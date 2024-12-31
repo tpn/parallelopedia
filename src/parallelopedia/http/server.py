@@ -1044,15 +1044,6 @@ async def main(ip='0.0.0.0', port=8080):
 
 if __name__ == '__main__':
     asyncio.run(main())
-        lambda: HttpServer(),
-        '0.0.0.0', 8080
-    )
-
-    async with server:
-        await server.serve_forever()
-
-if __name__ == '__main__':
-    asyncio.run(main())
 
 if __name__ == '__main__':
     main()
