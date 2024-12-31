@@ -1042,7 +1042,7 @@ class HttpServer(asyncio.Protocol):
         if response and not response.sendfile:
             response_bytes = bytes(response)
             logging.debug(f"Sending {len(response_bytes)} byte(s) response.")
-            request.transport.write(bytes(response))
+            request.transport.write(response_bytes)
         if not request.keep_alive:
             logging.debug("Closing connection.")
             request.transport.close()
