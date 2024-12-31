@@ -1049,6 +1049,11 @@ async def main(ip='0.0.0.0', port=8080):
         default=8080,
         help='Port number to bind the server to.',
     )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug mode for asyncio.',
+    )
     args = parser.parse_args()
 
     server = await loop.create_server(
@@ -1060,7 +1065,7 @@ async def main(ip='0.0.0.0', port=8080):
         await server.serve_forever()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    asyncio.run(main(), debug=args.debug)
 
 if __name__ == '__main__':
     main()
