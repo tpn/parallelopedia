@@ -3,6 +3,7 @@
 #===============================================================================
 import os
 import logging
+import logging
 import argparse
 import time
 import html
@@ -1029,6 +1030,9 @@ class HttpServer(asyncio.Protocol):
     def merge(cls, other):
         for (path, value) in other.routes.items():
             cls.routes[path] = value
+
+# Set up logging configuration
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 async def main(ip='0.0.0.0', port=8080):
     loop = asyncio.get_running_loop()
