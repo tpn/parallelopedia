@@ -651,7 +651,7 @@ class HttpServer(asyncio.Protocol):
         else:
             return bytes(response)
 
-    def process_new_request(self, request):
+    async def process_new_request(self, request):
         raw = request.data
         ix = raw.find(b'\r\n')
         if ix == -1:
