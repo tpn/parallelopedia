@@ -1020,6 +1020,8 @@ class HttpServer(asyncio.Protocol):
         response_bytes = bytes(response)
         logging.debug("Error response: %s", response_bytes)
 
+        assert request.transport == self.transport
+
         request.transport.write(response_bytes)
         request.transport.close()
         return
