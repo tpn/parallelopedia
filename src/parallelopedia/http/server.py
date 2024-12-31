@@ -620,16 +620,7 @@ class HttpServer(asyncio.Protocol):
     def data_received(self, data):
         logging.debug("Data received: %s", data)
         request = Request(self.transport, data)
-        try:
-            asyncio.create_task(self.process_new_request(request))
-        except Exception as e:
-            #msg = repr(e)
-            #async.debug(msg)
-            if e.args:
-                msg = '\n'.join(e.args)
-            elif e.message:
-                msg = e.message
-            self.error(request, 500, msg)
+        self.process_new_request(request)
 
         if not request.keep_alive:
             request.transport.close()
