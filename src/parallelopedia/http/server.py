@@ -845,7 +845,9 @@ class HttpServer(asyncio.Protocol):
     async def do_GET(self, request):
         response = request.response
         path = translate_path(request.path)
+        logging.debug("Translated path: %s", path)
         if os.path.isdir(path):
+            logging.debug("Path is a directory: %s", path)
             if not request.path.endswith('/'):
                 return self.redirect(request, request.path + '/')
             found = False
@@ -856,10 +858,12 @@ class HttpServer(asyncio.Protocol):
                     found = True
                     break
             if not found:
+                logging.debug("No index file found in directory: %s", path)
                 return self.list_directory(request, path)
 
         if not os.path.exists(path):
             msg = 'File not found: %s' % path
+            logging.debug(msg)
             return await self.error(request, 404, msg)
 
         return self.sendfile(request, path)
@@ -994,6 +998,7 @@ class HttpServer(asyncio.Protocol):
             return self.error(request, 404, msg)
 
     async def error(self, request, code, message=None):
+        logging.debug("Entering error method with code: %d, message: %s", code, message)
         r = RESPONSES[code]
         if not message:
             message = r[0]
