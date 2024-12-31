@@ -239,7 +239,7 @@ def router(routes=None):
                 path = urllib.parse.unquote(path)
                 args.append(path)
             if request.fragment:
-                args.append(fragment)
+                args.append(request.fragment)
 
             try:
                 result = self.func(obj, request, *args, **request.query)
@@ -614,7 +614,7 @@ class HttpServer(asyncio.Protocol):
         self.transport = transport
 
     def data_received(self, data):
-        request = Request(transport, data)
+        request = Request(self.transport, data)
         try:
             self.process_new_request(request)
         except Exception as e:
