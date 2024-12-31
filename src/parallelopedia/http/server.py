@@ -2,6 +2,7 @@
 # Imports
 #===============================================================================
 import os
+import argparse
 import time
 import html
 import json
@@ -1026,9 +1027,23 @@ class HttpServer(asyncio.Protocol):
         for (path, value) in other.routes.items():
             cls.routes[path] = value
 
-async def main():
+async def main(ip='0.0.0.0', port=8080):
     loop = asyncio.get_running_loop()
+    parser = argparse.ArgumentParser(description='Run the HTTP server.')
+    parser.add_argument('--ip', type=str, default='0.0.0.0', help='IP address to bind the server to.')
+    parser.add_argument('--port', type=int, default=8080, help='Port number to bind the server to.')
+    args = parser.parse_args()
+
     server = await loop.create_server(
+        lambda: HttpServer(),
+        args.ip, args.port
+    )
+
+    async with server:
+        await server.serve_forever()
+
+if __name__ == '__main__':
+    asyncio.run(main())
         lambda: HttpServer(),
         '0.0.0.0', 8080
     )
