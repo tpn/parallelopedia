@@ -1068,7 +1068,7 @@ class HttpServer(asyncio.Protocol):
 
 # Set up logging configuration
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, args.log_level),
     format='%(asctime)s - %(levelname)s - %(message)s',
 )
 
@@ -1090,6 +1090,13 @@ def parse_arguments():
         '--debug',
         action='store_true',
         help='Enable debug mode for asyncio.',
+    )
+    parser.add_argument(
+        '--log-level',
+        type=str,
+        default='DEBUG',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+        help='Set the logging level.',
     )
     return parser.parse_args()
 
