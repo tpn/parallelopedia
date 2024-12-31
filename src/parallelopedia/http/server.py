@@ -993,10 +993,12 @@ class HttpServer(asyncio.Protocol):
             msg = 'File not found: %s' % path
             return self.error(request, 404, msg)
 
-    def error(self, request, code, message=None):
+    async def error(self, request, code, message=None):
         r = RESPONSES[code]
         if not message:
             message = r[0]
+
+        logging.error("Error %d: %s", code, message)
 
         response = request.response
         response.code = code
@@ -1004,19 +1006,27 @@ class HttpServer(asyncio.Protocol):
         response.message = message
         response.explain = r[1]
 
-
         response.body = DEFAULT_ERROR_MESSAGE % {
             'code' : code,
             'message' : message,
             'explain' : response.explain,
         }
 
+        await self.send_response(request)
+
     def redirect(self, request, path):
         response = request.response
         response.other_headers.append('Location: %s' % path)
         return self.response(request, 301)
 
-    def response(self, request, code, message=None):
+    async def send_response(self, request):
+        response = request.response
+        if response and not response.sendfile:
+            request.transport.write(bytes(response))
+        if not request.keep_alive:
+            request.transport.close()
+
+    async def response(self, request, code, message=None):
         r = RESPONSES[code]
         if not message:
             message = r[0]
