@@ -2,6 +2,7 @@
 # Imports
 #===============================================================================
 import os
+import logging
 import argparse
 import time
 import html
@@ -612,9 +613,11 @@ class HttpServer(asyncio.Protocol):
     #max_sync_recv_attempts = 100
 
     def connection_made(self, transport):
+        logging.debug("Connection made with transport: %s", transport)
         self.transport = transport
 
     def data_received(self, data):
+        logging.debug("Data received: %s", data)
         request = Request(self.transport, data)
         try:
             self.process_new_request(request)
