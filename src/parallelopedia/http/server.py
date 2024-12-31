@@ -998,7 +998,6 @@ class HttpServer(asyncio.Protocol):
             return self.error(request, 404, msg)
 
     async def error(self, request, code, message=None):
-        logging.debug("Entering error method with code: %d, message: %s", code, message)
         r = RESPONSES[code]
         if not message:
             message = r[0]
@@ -1017,7 +1016,12 @@ class HttpServer(asyncio.Protocol):
             'explain' : response.explain,
         }
 
-        await self.send_response(request)
+        assert not response.sendfile
+        response_bytes = bytes(response)
+        logging.debug("Error response: %s", response_bytes)
+
+        await request.transport.write(response_bytes)
+        await request.transport.close()
         return
 
     def redirect(self, request, path):
