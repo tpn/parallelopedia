@@ -1003,23 +1003,6 @@ class HttpServer(asyncio.Protocol):
             logging.error("Error sending file: %s", e)
         finally:
             request.transport.close()
-        r = RESPONSES[code]
-        if not message:
-            message = r[0]
-
-        logging.error("Error %d: %s", code, message)
-
-        response = request.response
-        response.code = code
-        response.content_type = DEFAULT_ERROR_CONTENT_TYPE
-        response.message = message
-        response.explain = r[1]
-
-        response.body = DEFAULT_ERROR_MESSAGE % {
-            'code' : code,
-            'message' : message,
-            'explain' : response.explain,
-        }
 
         assert not response.sendfile
         response_bytes = bytes(response)
