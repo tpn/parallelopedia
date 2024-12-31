@@ -1041,7 +1041,7 @@ class HttpServer(asyncio.Protocol):
         response = request.response
         if response and not response.sendfile:
             response_bytes = bytes(response)
-            logging.debug("Sending response: %s", response_bytes)
+            logging.debug(f"Sending {len(response_bytes)} byte(s) response.")
             request.transport.write(bytes(response))
         if not request.keep_alive:
             logging.debug("Closing connection.")
@@ -1083,7 +1083,7 @@ def parse_arguments():
     parser.add_argument(
         '--port',
         type=int,
-        default=8080,
+        default=8888,
         help='Port number to bind the server to.',
     )
     parser.add_argument(
