@@ -857,7 +857,7 @@ class HttpServer(asyncio.Protocol):
             logging.debug(msg)
             return self.error(request, 404, msg)
 
-        return await self.sendfile(request, path)
+        return self.sendfile(request, path)
 
     def do_CONNECT(self, request):
         return self.error(request, 501, "Unsupported method: CONNECT")
@@ -996,6 +996,7 @@ class HttpServer(asyncio.Protocol):
             return self.error(request, 404, msg)
 
     async def _sendfile_task(self, request, file):
+        logging.debug("Sending file: %s", file)
         response = request.response
         try:
             sock = request.transport.get_extra_info('socket')
