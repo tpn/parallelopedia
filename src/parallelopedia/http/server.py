@@ -842,7 +842,7 @@ class HttpServer(asyncio.Protocol):
     def do_HEAD(self, request):
         return self.do_GET(request)
 
-    def do_GET(self, request):
+    async def do_GET(self, request):
         response = request.response
         path = translate_path(request.path)
         if os.path.isdir(path):
