@@ -607,7 +607,7 @@ class RangedRequest:
 class HttpServer(asyncio.Protocol):
     routes = None
 
-    use_sendfile = True
+    use_sendfile = False
     #throughput = True
     #low_latency = True
     #max_sync_send_attempts = 100
@@ -907,9 +907,9 @@ class HttpServer(asyncio.Protocol):
         response.message = 'OK'
         response.content_type = "text/html; charset=%s" % charset
         response.body = output
-        return
+        return self.send_response(request)
 
-    async def sendfile(self, request, path):
+    def sendfile(self, request, path):
         response = request.response
         response.content_type = guess_type(path)
         if not self.use_sendfile:
@@ -1000,23 +1000,37 @@ class HttpServer(asyncio.Protocol):
         response = request.response
         try:
             sock = request.transport.get_extra_info('socket')
-            os.sendfile(sock.fileno(), file.fileno(), None, os.fstat(file.fileno()).st_size)
+            os.sendfile(
+                sock.fileno(),
+                file.fileno(),
+                None,
+                os.fstat(file.fileno()).st_size
+            )
         except Exception as e:
             logging.error("Error sending file: %s", e)
         finally:
             request.transport.close()
 
     def error(self, request, code, message=None):
+        r = RESPONSES[code]
+        if not message:
+            message = r[0]
+
+        logging.error("Error %d: %s", code, message)
+
         response = request.response
         response.code = code
-        response.message = message or RESPONSES.get(code, ('', ''))[0]
-        response.body = (DEFAULT_ERROR_MESSAGE % {
-            'code': code,
-            'message': response.message,
-            'explain': RESPONSES.get(code, ('', ''))[1]
-        }).encode('UTF-8', 'replace')
         response.content_type = DEFAULT_ERROR_CONTENT_TYPE
-        return response
+        response.message = message
+        response.explain = r[1]
+
+        response.body = DEFAULT_ERROR_MESSAGE % {
+            'code' : code,
+            'message' : message,
+            'explain' : response.explain,
+        }
+
+        return self.send_response(request)
 
     def redirect(self, request, path):
         response = request.response
@@ -1026,9 +1040,14 @@ class HttpServer(asyncio.Protocol):
     def send_response(self, request):
         response = request.response
         if response and not response.sendfile:
+            response_bytes = bytes(response)
+            logging.debug("Sending response: %s", response_bytes)
             request.transport.write(bytes(response))
         if not request.keep_alive:
+            logging.debug("Closing connection.")
             request.transport.close()
+        else:
+            logging.debug("Keeping connection alive.")
 
     def response(self, request, code, message=None):
         r = RESPONSES[code]
@@ -1039,6 +1058,8 @@ class HttpServer(asyncio.Protocol):
         response.code = code
         response.message = message
         response.explain = r[1]
+
+        return self.send_response(request)
 
     @classmethod
     def merge(cls, other):
