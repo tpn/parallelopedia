@@ -996,6 +996,7 @@ class HttpServer(asyncio.Protocol):
             return self.error(request, 404, msg)
 
     async def _sendfile_task(self, request, file):
+        response = request.response
         try:
             sock = request.transport.get_extra_info('socket')
             os.sendfile(sock.fileno(), file.fileno(), None, os.fstat(file.fileno()).st_size)
@@ -1003,15 +1004,6 @@ class HttpServer(asyncio.Protocol):
             logging.error("Error sending file: %s", e)
         finally:
             request.transport.close()
-
-        assert not response.sendfile
-        response_bytes = bytes(response)
-        logging.debug("Error response: %s", response_bytes)
-
-        assert request.transport == self.transport
-
-        request.transport.write(response_bytes)
-        request.transport.close()
 
     def redirect(self, request, path):
         response = request.response
