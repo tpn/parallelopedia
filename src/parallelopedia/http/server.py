@@ -642,11 +642,11 @@ class HttpServer(asyncio.Protocol):
         else:
             return bytes(response)
 
-    async def process_new_request(self, request):
+    def process_new_request(self, request):
         raw = request.data
         ix = raw.find(b'\r\n')
         if ix == -1:
-            return await self.error(request, 400, "Line too long")
+            return self.error(request, 400, "Line too long")
         (requestline, rest) = (raw[:ix], raw[ix+2:])
         words = requestline.split()
         num_words = len(words)
@@ -654,7 +654,7 @@ class HttpServer(asyncio.Protocol):
             (command, raw_path, version) = words
             if version[:5] != b'HTTP/':
                 msg = "Bad request version (%s)" % version
-                return await self.error(request, 400, msg)
+                return self.error(request, 400, msg)
             try:
                 base_version_number = version.split(b'/', 1)[1]
                 version_number = base_version_number.split(b'.')
@@ -669,12 +669,12 @@ class HttpServer(asyncio.Protocol):
                 version_number = int(version_number[0]), int(version_number[1])
             except (ValueError, IndexError):
                 msg = "Bad request version (%s)" % version
-                return await self.error(request, 400, msg)
+                return self.error(request, 400, msg)
             if version_number >= (1, 1):
                 request.keep_alive = True
             if version_number >= (2, 0):
                 msg = "Invalid HTTP Version (%s)" % base_version_number
-                return await self.error(request, 505, msg)
+                return self.error(request, 505, msg)
 
         elif num_words == 2:
             (command, raw_path) = words
@@ -698,13 +698,13 @@ class HttpServer(asyncio.Protocol):
 
         ix = rest.rfind(b'\r\n\r\n')
         if ix == -1:
-            return await self.error(request, 400, "Line too long")
+            return self.error(request, 400, "Line too long")
 
         raw_headers = rest[:ix]
         try:
             headers = Headers(raw_headers)
         except Exception as e:
-            return await self.error(request, 400, "Malformed headers")
+            return self.error(request, 400, "Malformed headers")
 
         h = request.headers = headers
 
@@ -758,7 +758,7 @@ class HttpServer(asyncio.Protocol):
         if h.range:
             if ',' in h.range:
                 # Don't permit multiple ranges.
-                return await self.error(request, 400, "Multiple ranges not supported")
+                return self.error(request, 400, "Multiple ranges not supported")
 
             # But for anything else, the HTTP spec says to fall through and
             # process as per normal, so we just blow away the h.range header
@@ -777,9 +777,9 @@ class HttpServer(asyncio.Protocol):
         self.pre_route(request)
         func = self.dispatch(request)
         if not func:
-            return await self.error(request, 400, 'Unsupported Method')
+            return self.error(request, 400, 'Unsupported Method')
 
-        return await func(request)
+        return func(request)
 
     def pre_route(self, request):
         """Fiddle with request.path if necessary here."""
@@ -833,7 +833,7 @@ class HttpServer(asyncio.Protocol):
     def do_HEAD(self, request):
         return self.do_GET(request)
 
-    async def do_GET(self, request):
+    def do_GET(self, request):
         response = request.response
         path = translate_path(request.path)
         logging.debug("Translated path: %s", path)
@@ -855,7 +855,7 @@ class HttpServer(asyncio.Protocol):
         if not os.path.exists(path):
             msg = 'File not found: %s' % path
             logging.debug(msg)
-            return await self.error(request, 404, msg)
+            return self.error(request, 404, msg)
 
         return self.sendfile(request, path)
 
@@ -909,7 +909,7 @@ class HttpServer(asyncio.Protocol):
         response.body = output
         return
 
-    async def sendfile(self, request, path):
+    def sendfile(self, request, path):
         response = request.response
         response.content_type = guess_type(path)
         if not self.use_sendfile:
@@ -925,7 +925,7 @@ class HttpServer(asyncio.Protocol):
 
             except IOError:
                 msg = 'File not found: %s' % path
-                return await self.error(request, 404, msg)
+                return self.error(request, 404, msg)
 
         st = os.stat(path)
         size = st[6]
@@ -936,7 +936,7 @@ class HttpServer(asyncio.Protocol):
             try:
                 r.set_file_size(size)
             except InvalidRangeRequest:
-                return await self.error(request, 416)
+                return self.error(request, 416)
 
             try:
                 response.content_length = r.num_bytes_to_send
@@ -947,7 +947,7 @@ class HttpServer(asyncio.Protocol):
                 if request.command == 'GET':
                     response.sendfile = True
                     before = bytes(response)
-                    await response.transport.sendfile_ranged(
+                    response.transport.sendfile_ranged(
                         before,
                         path,
                         None, # after
@@ -958,7 +958,7 @@ class HttpServer(asyncio.Protocol):
                     return
 
             except InvalidFileRangeError:
-                return await self.error(request, 416)
+                return self.error(request, 416)
 
             except IOError:
                 msg = 'File not found: %s' % path
@@ -976,19 +976,19 @@ class HttpServer(asyncio.Protocol):
             if request.command == 'GET':
                 response.sendfile = True
                 before = bytes(response)
-                await response.transport.sendfile(before, path, None)
+                response.transport.sendfile(before, path, None)
             else:
                 return
 
         except FileTooLargeError:
             msg = "File too large (>2GB); use ranged requests."
-            return await self.error(request, 413, msg)
+            return self.error(request, 413, msg)
 
         except IOError:
             msg = 'File not found: %s' % path
             return self.error(request, 404, msg)
 
-    async def error(self, request, code, message=None):
+    def error(self, request, code, message=None):
         r = RESPONSES[code]
         if not message:
             message = r[0]
@@ -1015,21 +1015,20 @@ class HttpServer(asyncio.Protocol):
 
         request.transport.write(response_bytes)
         request.transport.close()
-        return
 
     def redirect(self, request, path):
         response = request.response
         response.other_headers.append('Location: %s' % path)
         return self.response(request, 301)
 
-    async def send_response(self, request):
+    def send_response(self, request):
         response = request.response
         if response and not response.sendfile:
             request.transport.write(bytes(response))
         if not request.keep_alive:
             request.transport.close()
 
-    async def response(self, request, code, message=None):
+    def response(self, request, code, message=None):
         r = RESPONSES[code]
         if not message:
             message = r[0]
