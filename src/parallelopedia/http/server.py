@@ -1034,8 +1034,7 @@ class HttpServer(asyncio.Protocol):
 # Set up logging configuration
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-async def main(ip='0.0.0.0', port=8080):
-    loop = asyncio.get_running_loop()
+def parse_arguments():
     parser = argparse.ArgumentParser(description='Run the HTTP server.')
     parser.add_argument(
         '--ip',
@@ -1054,7 +1053,10 @@ async def main(ip='0.0.0.0', port=8080):
         action='store_true',
         help='Enable debug mode for asyncio.',
     )
-    args = parser.parse_args()
+    return parser.parse_args()
+
+async def main(ip, port):
+    loop = asyncio.get_running_loop()
 
     server = await loop.create_server(
         lambda: HttpServer(),
@@ -1065,7 +1067,8 @@ async def main(ip='0.0.0.0', port=8080):
         await server.serve_forever()
 
 if __name__ == '__main__':
-    asyncio.run(main(), debug=args.debug)
+    args = parse_arguments()
+    asyncio.run(main(args.ip, args.port), debug=args.debug)
 
 if __name__ == '__main__':
     main()
