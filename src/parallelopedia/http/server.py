@@ -1066,11 +1066,6 @@ class HttpServer(asyncio.Protocol):
         for (path, value) in other.routes.items():
             cls.routes[path] = value
 
-# Set up logging configuration
-logging.basicConfig(
-    level=getattr(logging, args.log_level),
-    format='%(asctime)s - %(levelname)s - %(message)s',
-)
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Run the HTTP server.')
@@ -1113,6 +1108,11 @@ async def main(ip, port):
 
 if __name__ == '__main__':
     args = parse_arguments()
+    # Set up logging configuration
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s - %(levelname)s - %(message)s',
+    )
     asyncio.run(main(args.ip, args.port), debug=args.debug)
 
 if __name__ == '__main__':
