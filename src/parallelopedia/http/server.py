@@ -914,7 +914,7 @@ class HttpServer(asyncio.Protocol):
         response.body = output
         return
 
-    def sendfile(self, request, path):
+    async def sendfile(self, request, path):
         response = request.response
         response.content_type = guess_type(path)
         if not self.use_sendfile:
