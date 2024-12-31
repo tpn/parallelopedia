@@ -1033,8 +1033,18 @@ class HttpServer(asyncio.Protocol):
 async def main(ip='0.0.0.0', port=8080):
     loop = asyncio.get_running_loop()
     parser = argparse.ArgumentParser(description='Run the HTTP server.')
-    parser.add_argument('--ip', type=str, default='0.0.0.0', help='IP address to bind the server to.')
-    parser.add_argument('--port', type=int, default=8080, help='Port number to bind the server to.')
+    parser.add_argument(
+        '--ip',
+        type=str,
+        default='0.0.0.0',
+        help='IP address to bind the server to.',
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=8080,
+        help='Port number to bind the server to.',
+    )
     args = parser.parse_args()
 
     server = await loop.create_server(
