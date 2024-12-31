@@ -909,7 +909,7 @@ class HttpServer(asyncio.Protocol):
         response.body = output
         return
 
-    def sendfile(self, request, path):
+    async def sendfile(self, request, path):
         response = request.response
         response.content_type = guess_type(path)
         if not self.use_sendfile:
@@ -976,13 +976,22 @@ class HttpServer(asyncio.Protocol):
             if request.command == 'GET':
                 response.sendfile = True
                 before = bytes(response)
+                loop = asyncio.get_running_loop()
                 with open(path, 'rb') as f:
+                    fs = os.fstat(f.fileno())
+                    response.content_length = fs.st_size
+                    response.last_modified = date_time_string(fs.st_mtime)
                     response.transport.write(before)
-                    while True:
-                        chunk = f.read(8192)
-                        if not chunk:
-                            break
-                        response.transport.write(chunk)
+
+                    # Use run_in_executor to call os.sendfile in a non-blocking way
+                    await loop.run_in_executor(
+                        None,
+                        os.sendfile,
+                        request.transport.get_extra_info('socket').fileno(),
+                        f.fileno(),
+                        None,
+                        fs.st_size
+                    )
             else:
                 return
 
