@@ -1020,8 +1020,8 @@ class HttpServer(asyncio.Protocol):
         response_bytes = bytes(response)
         logging.debug("Error response: %s", response_bytes)
 
-        await request.transport.write(response_bytes)
-        await request.transport.close()
+        request.transport.write(response_bytes)
+        request.transport.close()
         return
 
     def redirect(self, request, path):
