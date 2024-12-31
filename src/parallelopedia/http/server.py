@@ -621,7 +621,7 @@ class HttpServer(asyncio.Protocol):
         logging.debug("Data received: %s", data)
         request = Request(self.transport, data)
         try:
-            self.process_new_request(request)
+            asyncio.create_task(self.process_new_request(request))
         except Exception as e:
             #msg = repr(e)
             #async.debug(msg)
