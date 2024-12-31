@@ -23,7 +23,7 @@ class InvalidFileRangeError(Exception):
 class FileTooLargeError(Exception):
     pass
 
-from . import (
+from parallelopedia.http import (
     DEFAULT_CONTENT_TYPE,
     DEFAULT_ERROR_CONTENT_TYPE,
     DEFAULT_ERROR_MESSAGE,
