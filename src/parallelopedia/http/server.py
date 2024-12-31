@@ -952,7 +952,7 @@ class HttpServer(asyncio.Protocol):
                 if request.command == 'GET':
                     response.sendfile = True
                     before = bytes(response)
-                    return response.transport.sendfile_ranged(
+                    await response.transport.sendfile_ranged(
                         before,
                         path,
                         None, # after
@@ -981,7 +981,7 @@ class HttpServer(asyncio.Protocol):
             if request.command == 'GET':
                 response.sendfile = True
                 before = bytes(response)
-                return response.transport.sendfile(before, path, None)
+                await response.transport.sendfile(before, path, None)
             else:
                 return
 
