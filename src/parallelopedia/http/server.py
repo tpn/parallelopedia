@@ -1018,6 +1018,7 @@ class HttpServer(asyncio.Protocol):
         }
 
         await self.send_response(request)
+        return
 
     def redirect(self, request, path):
         response = request.response
