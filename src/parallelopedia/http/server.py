@@ -788,7 +788,7 @@ class HttpServer(asyncio.Protocol):
         if not func:
             return await self.error(request, 400, 'Unsupported Method')
 
-        return func(request)
+        return await func(request)
 
     def pre_route(self, request):
         """Fiddle with request.path if necessary here."""
