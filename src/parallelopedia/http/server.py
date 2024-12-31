@@ -976,22 +976,14 @@ class HttpServer(asyncio.Protocol):
             if request.command == 'GET':
                 response.sendfile = True
                 before = bytes(response)
-                loop = asyncio.get_running_loop()
                 with open(path, 'rb') as f:
                     fs = os.fstat(f.fileno())
                     response.content_length = fs.st_size
                     response.last_modified = date_time_string(fs.st_mtime)
                     response.transport.write(before)
 
-                    # Use run_in_executor to call os.sendfile in a non-blocking way
-                    await loop.run_in_executor(
-                        None,
-                        os.sendfile,
-                        request.transport.get_extra_info('socket').fileno(),
-                        f.fileno(),
-                        None,
-                        fs.st_size
-                    )
+                    # Enqueue a task to the event loop to handle the file sending
+                    asyncio.create_task(self._sendfile_task(request, f))
             else:
                 return
 
@@ -1003,7 +995,14 @@ class HttpServer(asyncio.Protocol):
             msg = 'File not found: %s' % path
             return self.error(request, 404, msg)
 
-    def error(self, request, code, message=None):
+    async def _sendfile_task(self, request, file):
+        try:
+            sock = request.transport.get_extra_info('socket')
+            os.sendfile(sock.fileno(), file.fileno(), None, os.fstat(file.fileno()).st_size)
+        except Exception as e:
+            logging.error("Error sending file: %s", e)
+        finally:
+            request.transport.close()
         r = RESPONSES[code]
         if not message:
             message = r[0]
