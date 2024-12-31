@@ -976,7 +976,13 @@ class HttpServer(asyncio.Protocol):
             if request.command == 'GET':
                 response.sendfile = True
                 before = bytes(response)
-                response.transport.sendfile(before, path, None)
+                with open(path, 'rb') as f:
+                    response.transport.write(before)
+                    while True:
+                        chunk = f.read(8192)
+                        if not chunk:
+                            break
+                        response.transport.write(chunk)
             else:
                 return
 
