@@ -10,6 +10,7 @@ import urllib
 import inspect
 import mimetypes
 import posixpath
+import asyncio
 
 from functools import (
     partial,
@@ -600,7 +601,7 @@ class RangedRequest:
             self.file_size,
         )
 
-class HttpServer:
+class HttpServer(asyncio.Protocol):
     routes = None
 
     use_sendfile = True
@@ -609,8 +610,10 @@ class HttpServer:
     #max_sync_send_attempts = 100
     #max_sync_recv_attempts = 100
 
-    def data_received(self, transport, data):
-        #async.debug(data)
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def data_received(self, data):
         request = Request(transport, data)
         try:
             self.process_new_request(request)
@@ -1023,13 +1026,18 @@ class HttpServer:
         for (path, value) in other.routes.items():
             cls.routes[path] = value
 
-def main():
-    import socket
-    ipaddr = socket.gethostbyname(socket.gethostname())
+async def main():
+    loop = asyncio.get_running_loop()
+    server = await loop.create_server(
+        lambda: HttpServer(),
+        '0.0.0.0', 8080
+    )
 
-    #server = async.server(ipaddr, 8080)
-    #async.register(transport=server, protocol=HttpServer)
-    #async.run()
+    async with server:
+        await server.serve_forever()
+
+if __name__ == '__main__':
+    asyncio.run(main())
 
 if __name__ == '__main__':
     main()
