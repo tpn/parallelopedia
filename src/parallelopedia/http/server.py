@@ -1006,6 +1006,18 @@ class HttpServer(asyncio.Protocol):
         finally:
             request.transport.close()
 
+    def error(self, request, code, message=None):
+        response = request.response
+        response.code = code
+        response.message = message or RESPONSES.get(code, ('', ''))[0]
+        response.body = (DEFAULT_ERROR_MESSAGE % {
+            'code': code,
+            'message': response.message,
+            'explain': RESPONSES.get(code, ('', ''))[1]
+        }).encode('UTF-8', 'replace')
+        response.content_type = DEFAULT_ERROR_CONTENT_TYPE
+        return response
+
     def redirect(self, request, path):
         response = request.response
         response.other_headers.append('Location: %s' % path)
