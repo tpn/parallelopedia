@@ -1,5 +1,17 @@
 import pytest
-from parallelopedia.http.server import RangedRequest, InvalidRangeRequest, RangeRequestTooLarge
+
+try:
+    import parallelopedia
+except ImportError:
+    import sys
+    sys.path.append('../src')
+    import parallelopedia
+
+from parallelopedia.http.server import (
+    RangedRequest,
+    InvalidRangeRequest,
+    RangeRequestTooLarge,
+)
 
 def test_ranged_request_valid_range():
     rr = RangedRequest('bytes=0-499')
