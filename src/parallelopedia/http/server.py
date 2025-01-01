@@ -290,11 +290,8 @@ def json_serialization(request=None, obj=None):
     return request
 
 def text_response(request=None, text=None):
-    transport = None
     if not request:
         request = Request(transport=None, data=None)
-    else:
-        transport = request.transport
     if not text:
         text = 'Hello, World!'
     response = request.response
@@ -530,9 +527,6 @@ class Request:
                     if k not in ('transport', 'response')
         }
 
-    #def __repr__(self):
-    #    return repr(self._to_dict())
-
     def _to_json(self):
         return json.dumps(self._to_dict())
 
@@ -604,7 +598,11 @@ class RangedRequest:
             self.file_size,
         )
 
+#routes = make_routes()
+#route = router(routes)
+
 class HttpServer(asyncio.Protocol):
+    #routes = routes
     routes = None
 
     use_sendfile = False
@@ -622,17 +620,6 @@ class HttpServer(asyncio.Protocol):
         request = Request(self.transport, data)
         self.process_new_request(request)
 
-        if not request.keep_alive:
-            request.transport.close()
-
-        response = request.response
-        if not response or response.sendfile:
-            return None
-        else:
-            return bytes(response)
-
-    def process_data_received(self, request):
-        self.process_new_request(request)
         if not request.keep_alive:
             request.transport.close()
 
@@ -774,18 +761,18 @@ class HttpServer(asyncio.Protocol):
         # This routing/dispatching logic is quite possibly the most horrendous
         # thing I've ever written.  On the other hand, it gets the immediate
         # job done, so eh.
-        self.pre_route(request)
-        func = self.dispatch(request)
+        self._pre_route(request)
+        func = self._dispatch(request)
         if not func:
             return self.error(request, 400, 'Unsupported Method')
 
         return func(request)
 
-    def pre_route(self, request):
+    def _pre_route(self, request):
         """Fiddle with request.path if necessary here."""
         return None
 
-    def route(self, request):
+    def _route(self, request):
         """Override in subclass if desired.  Return a callable."""
         if not self.routes:
             return
@@ -797,13 +784,13 @@ class HttpServer(asyncio.Protocol):
         except (KeyError, AttributeError):
             pass
 
-    def dispatch(self, request):
-        func = self.route(request)
+    def _dispatch(self, request):
+        func = self._route(request)
         if not func:
-            func = self.simple_overload_dispatch(request)
+            func = self._simple_overload_dispatch(request)
         return func
 
-    def simple_overload_dispatch(self, request):
+    def _simple_overload_dispatch(self, request):
         func = None
         path = request.path
         command = request.command
@@ -863,7 +850,6 @@ class HttpServer(asyncio.Protocol):
         return self.error(request, 501, "Unsupported method: CONNECT")
 
     def list_directory(self, request, path):
-        #async.debug(repr(request))
         try:
             paths = os.listdir(path)
         except os.error:
@@ -873,7 +859,6 @@ class HttpServer(asyncio.Protocol):
         paths.sort(key=lambda a: a.lower())
 
         displaypath = html_escape(url_unquote(request.path))
-        #charset = sys.getfilesystemencoding()
         charset = 'utf-8'
         title = 'Directory listing for %s' % displaypath
         items = []
@@ -1066,7 +1051,6 @@ class HttpServer(asyncio.Protocol):
         for (path, value) in other.routes.items():
             cls.routes[path] = value
 
-
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Run the HTTP server.')
     parser.add_argument(
@@ -1089,30 +1073,122 @@ def parse_arguments():
     parser.add_argument(
         '--log-level',
         type=str,
-        default='DEBUG',
+        default='CRITICAL',
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
         help='Set the logging level.',
     )
+    parser.add_argument(
+        '--threads',
+        type=int,
+        default=1,
+        help='Number of threads to use.',
+    )
+    parser.add_argument(
+        '--protocol-class',
+        type=str,
+        default='parallelopedia.http.server.HttpServer',
+        help='The protocol class to use for the server.',
+    )
+    parser.add_argument(
+        '--server-mode',
+        type=str,
+        default='MULTI_ACCEPT_SOCKET',
+        choices=['SINGLE_ACCEPT_SOCKET', 'MULTI_ACCEPT_SOCKET'],
+        help='The server mode to use.',
+    )
+    parser.add_argument(
+        '--listen-backlog',
+        type=int,
+        default=100,
+        help='The listen backlog for the server.',
+    )
     return parser.parse_args()
 
-async def main(ip, port):
+def get_class_from_string(class_name):
+    parts = class_name.split('.')
+    module_name = '.'.join(parts[:-1])
+    class_name = parts[-1]
+    module = __import__(module_name)
+    for comp in parts[1:]:
+        module = getattr(module, comp)
+    return module
+
+async def main_async(args: argparse.Namespace, protocol):
     loop = asyncio.get_running_loop()
 
     server = await loop.create_server(
-        lambda: HttpServer(),
-        args.ip, args.port
+        protocol,
+        args.ip,
+        args.port,
+        backlog=args.listen_backlog,
+        reuse_address=True,
+        reuse_port=True,
     )
 
     async with server:
         await server.serve_forever()
 
-if __name__ == '__main__':
+def start_event_loop(args: argparse.Namespace, protocol):
+    asyncio.run(
+        main_async(
+            args,
+            protocol
+        ),
+        debug=args.debug,
+    )
+
+def main_threaded_single_accept(args: argparse.Namespace, protocol):
+    """
+    This is the main function for the server when it is running in
+    multi-threaded mode with a single accept socket.
+    """
+    raise NotImplementedError
+
+def main_threaded_multi_accept(args: argparse.Namespace, protocol):
+    """
+    This is the main function for the server when it is running in
+    multi-threaded mode with multiple accept sockets.  Each thread
+    will have its own asyncio loop issue a create_server() call for
+    the given host/port and protocol.
+    """
+    import threading
+    threads = []
+    for i in range(args.threads):
+        thread = threading.Thread(
+            target=start_event_loop,
+            args=(args, protocol),
+        )
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
+
+
+def main():
     args = parse_arguments()
     # Set up logging configuration
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format='%(asctime)s - %(levelname)s - %(message)s',
     )
-    asyncio.run(main(args.ip, args.port), debug=args.debug)
+    protocol = get_class_from_string(args.protocol_class)
+
+    if args.threads == 1:
+        asyncio.run(
+            main_async(
+                args,
+                protocol
+            ),
+            debug=args.debug,
+        )
+    elif args.server_mode == 'SINGLE_ACCEPT_SOCKET':
+        main_threaded_single_accept(args, protocol)
+    else:
+        assert args.server_mode == 'MULTI_ACCEPT_SOCKET', args.server_mode
+        main_threaded_multi_accept(args, protocol)
+
+if __name__ == '__main__':
+    main()
 
 # vim:set ts=8 sw=4 sts=4 tw=78 et:

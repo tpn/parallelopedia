@@ -7,6 +7,7 @@ parallel.
 #===============================================================================
 # Imports
 #===============================================================================
+import os
 import time
 import glob
 import json
@@ -14,7 +15,13 @@ import mmap
 import socket
 import datrie
 import string
+import logging
+import threading
 import numpy as np
+from typing import (
+    List,
+    Tuple,
+)
 
 from collections import (
     defaultdict,
@@ -22,6 +29,11 @@ from collections import (
 
 from numpy import (
     uint64,
+)
+
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed,
 )
 
 from parallelopedia.http.server import (
@@ -50,14 +62,6 @@ def join_path(*args):
 # Change this to the directory containing the downloaded files.
 #DATA_DIR = r'd:\data'
 DATA_DIR = join_path(dirname(__file__), '../../data')
-
-# If you want to change the hostname listened on from the default (which will
-# resolve to whatever IP address the computer name resolves to), do so here.
-HOSTNAME = socket.gethostname()
-# E.g.:
-# HOSTNAME = 'localhost'
-IPADDR = '0.0.0.0'
-PORT = 8080
 
 #===============================================================================
 # Constants
@@ -92,6 +96,8 @@ ZTITLES_TRIE_PATH = join_path(DATA_DIR, 'ztitles.trie')
 # satisfied with a ranged HTTP request.
 TITLES_OFFSETS_NPY_PATH = join_path(DATA_DIR, 'titles_offsets.npy')
 
+PARTITIONS = 127
+
 #===============================================================================
 # Aliases
 #===============================================================================
@@ -106,6 +112,7 @@ def get_wiki_tries_in_dir(directory : str) -> List[str]:
 
 def get_wiki_tries(directory : str) -> dict:
     paths = get_wiki_tries_in_dir(directory)
+    basename = os.path.basename
     result = {}
     for path in paths:
         base = basename(path).replace('wiki-', '').replace('.trie', '')
@@ -119,21 +126,26 @@ def get_wiki_tries(directory : str) -> dict:
 def load_trie(path : str) -> datrie.Trie:
     msg_prefix = f'[{threading.get_native_id()}]'
     start = time.perf_counter()
-    print(f'{msg_prefix} Loading {path}...')
+    logging.debug(f'{msg_prefix} Loading {path}...')
     trie = datrie.Trie.load(path)
     end = time.perf_counter()
     elapsed = end - start
-    print(f'{msg_prefix} Loaded {path} in {elapsed:.4f} seconds.')
+    logging.debug(f'{msg_prefix} Loaded {path} in {elapsed:.4f} seconds.')
     return trie
 
-def load_wiki_tries_parallel(directory : str, max_threads : int = 0) -> List[datrie.Trie]:
+def load_wiki_tries_parallel(
+    directory : str,
+    max_threads : int = 0
+) -> List[datrie.Trie]:
+
     if max_threads < 1:
         max_threads = os.cpu_count()
 
-    tries = [None] * PARTITIONS
     paths_by_first_char = get_wiki_tries(directory)
+    tries = [None] * PARTITIONS
+    num_tries = len(paths_by_first_char)
     print(
-        f'Loading {len(paths_by_first_char)} tries in parallel with '
+        f'Loading {num_tries} tries in parallel with '
         f'{max_threads} threads...'
     )
     start = time.perf_counter()
@@ -153,7 +165,7 @@ def load_wiki_tries_parallel(directory : str, max_threads : int = 0) -> List[dat
                 print(f'Error loading {path}: {e}')
     end = time.perf_counter()
     elapsed = end - start
-    print(f'Loaded {len(tries)} tries in {elapsed:.4f} seconds.')
+    print(f'Loaded {num_tries} tries in {elapsed:.4f} seconds.')
     return tries
 
 #===============================================================================
@@ -173,31 +185,23 @@ except AttributeError:
     # Ignore if madvise is not available.
     pass
 
-print("About to load offsets numpy array, this will take a while...")
 TITLE_OFFSETS = np.load(TITLES_OFFSETS_NPY_PATH)
-print("Done loading offsets numpy array.")
 
 # Now load all of the tries in parallel.
-print("About to load all title tries in parallel...")
 TITLE_TRIES = load_wiki_tries_parallel(DATA_DIR)
-print("Done loading all title tries in parallel.")
 
 #===============================================================================
 # Misc Helpers
 #===============================================================================
-def json_serialization(request=None, obj=None):
+def json_serialization(request : Request = None, obj : dict = None) -> Request:
     """
     Helper method for converting a dict `obj` into a JSON response for the
     incoming `request`.
     """
-    transport = None
     if not request:
         request = Request(transport=None, data=None)
-    else:
-        transport = request.transport
     if not obj:
         obj = {}
-    #parallel.debug('obj: %r' % obj)
     response = request.response
     response.code = 200
     response.message = 'OK'
@@ -233,11 +237,13 @@ def get_page_offsets_for_key(search_string: str) -> List[Tuple[str, int, int]]:
     if len(search_string) < 1:
         return None
     results = []
-    offsets = TITLE_OFFSETS
     titles = TITLE_TRIES[ord(search_string[0])]
+    if not titles:
+        return results
     items = titles.items(search_string)
     if not items:
         return results
+    offsets = TITLE_OFFSETS
     for (key, value) in items:
         v = value[0]
         o = uint64(v if v > 0 else v*-1)
@@ -274,11 +280,12 @@ class WikiServer(HttpServer):
             return self.error(request, 400, "Name too short (< 1 char)")
 
         titles = TITLE_TRIES[ord(name[0])]
-        if name not in titles:
+        if not titles or name not in titles:
             return self.error(request, 404)
 
         o = titles[name][0]
         o = uint64(o if o > 0 else o*-1)
+        offsets = TITLE_OFFSETS
         ix = offsets.searchsorted(o, side='right')
         start = int(o-uint64_7)
         end = int(offsets[ix]-uint64_11)
@@ -295,7 +302,9 @@ class WikiServer(HttpServer):
         if len(name) < 3:
             return self.error(request, 400, "Name too short (< 3 chars)")
 
-        return json_serialization(request, get_page_offsets_for_key3(name))
+        return self.send_response(
+            json_serialization(request, get_page_offsets_for_key(name))
+        )
 
     @route
     def xml(self, request, *args, **kwds):
@@ -316,30 +325,25 @@ class WikiServer(HttpServer):
             return self.error(request, 400, "Name too short (< 1 char)")
 
         titles = TITLE_TRIES[ord(name[0])]
+        if not titles or name not in titles:
+            return self.error(request, 404)
+
         items = titles.items(name)
-        return json_serialization(request, items)
+        return self.send_response(
+            json_serialization(request, items)
+        )
+
 
     @route
     def json(self, request, *args, **kwds):
-        return json_serialization(request, {'message': 'Hello, World!'})
+        return self.send_response(
+            json_serialization(request, {'message': 'Hello, World!'})
+        )
 
     @route
     def plaintext(self, request, *args, **kwds):
-        return text_serialization(request, text='Hello, World!')
-
-#===============================================================================
-# Main
-#===============================================================================
-
-def main():
-    server = parallel.server(IPADDR, PORT)
-    parallel.register(transport=server, protocol=WikiServer)
-    parallel.run_once()
-    return server
-
-if __name__ == '__main__':
-    server = main()
-    parallel.run()
-
+        return self.send_response(
+            text_serialization(request, text='Hello, World!')
+        )
 
 # vim:set ts=8 sw=4 sts=4 tw=78 et:                                            #
