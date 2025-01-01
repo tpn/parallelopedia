@@ -39,6 +39,7 @@ from concurrent.futures import (
 from parallelopedia.http.server import (
     router,
     make_routes,
+    date_time_string,
 
     Request,
     HttpServer,
@@ -172,6 +173,9 @@ def load_wiki_tries_parallel(
 # Globals
 #===============================================================================
 WIKI_XML_FILE = open(WIKI_XML_PATH, 'rb')
+WIKI_XML_STAT = os.fstat(WIKI_XML_FILE.fileno())
+WIKI_XML_SIZE = WIKI_XML_STAT.st_size
+WIKI_XML_LAST_MODIFIED = date_time_string(WIKI_XML_STAT.st_mtime)
 WIKI_XML_MMAP = mmap.mmap(
     WIKI_XML_FILE.fileno(),
     length=0,
@@ -273,6 +277,8 @@ route = router(routes)
 class WikiServer(HttpServer):
     routes = routes
 
+    use_mmap = True
+
     @route
     def wiki(self, request, name, **kwds):
         # Do an exact lookup if we find a match.
@@ -292,7 +298,12 @@ class WikiServer(HttpServer):
         range_request = '%d-%d' % (start, end)
         request.range = RangedRequest(range_request)
         request.response.content_type = 'text/xml; charset=utf-8'
-        return self.sendfile(request, WIKI_XML_PATH)
+        return self.ranged_sendfile_mmap(
+            request,
+            WIKI_XML_MMAP,
+            WIKI_XML_SIZE,
+            WIKI_XML_LAST_MODIFIED,
+        )
 
     @route
     def offsets(self, request, name, limit=None):

@@ -2,28 +2,23 @@
 # Imports
 #===============================================================================
 import os
-import logging
-import logging
-import argparse
+import sys
+import mmap
 import time
 import html
 import json
 import string
 import urllib
+import asyncio
 import inspect
+import logging
+import argparse
 import mimetypes
 import posixpath
-import asyncio
 
 from functools import (
     partial,
 )
-
-class InvalidFileRangeError(Exception):
-    pass
-
-class FileTooLargeError(Exception):
-    pass
 
 from parallelopedia.http import (
     DEFAULT_CONTENT_TYPE,
@@ -34,6 +29,9 @@ from parallelopedia.http import (
     DIRECTORY_LISTING,
     RESPONSES,
 )
+
+IS_WINDOWS = sys.platform == 'win32'
+IS_LINUX = sys.platform.startswith('linux')
 
 if not mimetypes.inited:
     mimetypes.init()
@@ -108,7 +106,7 @@ def guess_type(path):
 
     """
 
-    (base, ext) = posixpath.splitext(path)
+    (_, ext) = posixpath.splitext(path)
     if ext in extensions_map:
         return extensions_map[ext]
     ext = ext.lower()
@@ -534,6 +532,9 @@ class Request:
 class InvalidRangeRequest(BaseException):
     pass
 
+class RangeRequestTooLarge(BaseException):
+    pass
+
 class RangedRequest:
     __slots__ = (
         'first_byte',
@@ -573,6 +574,10 @@ class RangedRequest:
         except Exception as e:
             raise InvalidRangeRequest
 
+        if self.first_byte is not None and self.last_byte is not None:
+            if self.first_byte > self.last_byte:
+                raise InvalidRangeRequest
+
     def set_file_size(self, file_size):
         self.file_size = file_size
 
@@ -580,17 +585,21 @@ class RangedRequest:
             if self.suffix_length > self.file_size:
                 raise InvalidRangeRequest
 
-            self.last_byte = file_size-1
-            self.first_byte = file_size - self.suffix_length - 1
+            self.last_byte = file_size - 1
+            self.first_byte = file_size - self.suffix_length
 
         else:
             if self.first_byte > file_size-1:
                 raise InvalidRangeRequest
 
             if not self.last_byte or self.last_byte > file_size-1:
-                self.last_byte = file_size-1
+                self.last_byte = file_size - 1
 
         self.num_bytes_to_send = (self.last_byte - self.first_byte) + 1
+
+        # Verify the chunk requested is below 2GB.
+        if self.num_bytes_to_send > 2**31:
+            raise RangeRequestTooLarge
 
         self.content_range = 'Content-Range: %d-%d/%d' % (
             self.first_byte,
@@ -605,7 +614,7 @@ class HttpServer(asyncio.Protocol):
     #routes = routes
     routes = None
 
-    use_sendfile = False
+    use_sendfile = True
     #throughput = True
     #low_latency = True
     #max_sync_send_attempts = 100
@@ -894,107 +903,153 @@ class HttpServer(asyncio.Protocol):
         response.body = output
         return self.send_response(request)
 
-    def sendfile(self, request, path):
+    def ranged_sendfile_mmap(self, request : Request,
+                             memory_map : mmap.mmap,
+                             file_size : int,
+                             last_modified : str) -> None:
+        """
+        Sends a ranged request to the client using a memory-mapped file.
+
+        Args:
+
+            request (Request): Supplies the request object.  The request must
+                have a `range` attribute of type `RangedRequest`.
+
+            memory_map (mmap.mmap): Supplies a memory-mapped file object.  It
+                is advisable to have memory-mapped the file with
+                `MADV_RANDOM` on supported platforms.
+
+            file_size (int): Supplies the size of the file in bytes.
+
+            last_modified (str): Supplies the last modified date of the file.
+                Use `date_time_string()` to generate this value from the
+                file's `st_mtime`.
+
+        Errors:
+
+            If the request does not have a `range` attribute, a 500 internal
+            server error will be dispatched.
+
+            If the file range is invalid, a 416 range not satisfiable error
+            will be dispatched.
+
+            If the range request is over 2GB, a 413 request entity too large
+            error will be dispatched.
+        """
+        assert request.command == 'GET'
+
+        if not request.range:
+            return self.error(request, 500, "No range request")
+
+        r = request.range
+        try:
+            r.set_file_size(file_size)
+        except InvalidRangeRequest:
+            return self.error(request, 416)
+        except RangeRequestTooLarge:
+            return self.error(request, 413, "Range too large (>2GB)")
+
+        response = request.response
+        response.content_length = r.num_bytes_to_send
+        response.last_modified = last_modified
+        response.code = 206
+        response.message = 'Partial Content'
+        response.content_range = r.content_range
+
+        # On Windows, TransmitFile() allows preceeding "before" bytes to be
+        # send before the actual file content.  On Linux, you can kind of
+        # achieve this via TCP_CORK and sendfile(), but it's not as clean.
+        # As we're using memory-mapped files, we can just send the headers
+        # and the file content in one go.
+        file_content = memory_map[r.first_byte:r.last_byte+1]
+        response.body = file_content
+        self.send_response(request)
+
+    def sendfile(self, request : Request, path : str) -> None:
+        """
+        Sends a file to the client.
+
+        Args:
+
+            request (Request): Supplies the request object.  A ranged request
+                will be assumed if the request has a range attribute of type
+                `RangedRequest`.
+
+            path (str): Supplies the path to the file to send.
+        """
+        if IS_WINDOWS:
+            return self._sendfile_windows(request, path)
+        elif hasattr(os, 'sendfile'):
+            return self._sendfile_posix(request, path)
+        else:
+            return self._sendfile_fallback(request, path)
+
+    def _sendfile_windows(self, request : Request, path : str) -> None:
+        # Todo: use an optimal TransmitFile() implementation.
+        return self._sendfile_fallback(request, path)
+
+    def _sendfile_posix(self, request : Request, path : str) -> None:
+        # Todo: use an optimal sendfile() implementation.
+        return self._sendfile_fallback(request, path)
+
+    def _sendfile_fallback(self, request : Request, path : str) -> None:
         response = request.response
         response.content_type = guess_type(path)
-        if not self.use_sendfile:
-            try:
-                with open(path, 'rb') as f:
-                    fs = os.fstat(f.fileno())
-                    response.content_length = fs[6]
-                    response.last_modified = date_time_string(fs.st_mtime)
-                    if request.command == 'GET':
-                        response.body = f.read()
-                        l = len(response.body)
-                    return self.response(request, 200)
 
-            except IOError:
-                msg = 'File not found: %s' % path
-                return self.error(request, 404, msg)
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            msg = f'File not found: {path}' % path
+            return self.error(request, 404, msg)
 
-        st = os.stat(path)
-        size = st[6]
+        file_size = st.st_size
+        if file_size > 2**31 and not request.range:
+            msg = "File too large (>2GB); use ranged requests."
+            return self.error(request, 413, msg)
+
         last_modified = date_time_string(st.st_mtime)
 
         if request.range:
             r = request.range
             try:
-                r.set_file_size(size)
+                r.set_file_size(file_size)
             except InvalidRangeRequest:
-                return self.error(request, 416)
+                return self.error(request, 416, "Invalid range request")
+            except RangeRequestTooLarge:
+                return self.error(request, 413, "Range too large (>2GB)")
 
-            try:
-                response.content_length = r.num_bytes_to_send
-                response.last_modified = last_modified
-                response.code = 206
-                response.message = 'Partial Content'
-                response.content_range = r.content_range
-                if request.command == 'GET':
-                    response.sendfile = True
-                    before = bytes(response)
-                    response.transport.sendfile_ranged(
-                        before,
-                        path,
-                        None, # after
-                        r.first_byte, # offset
-                        r.num_bytes_to_send
-                    )
-                else:
-                    return
-
-            except InvalidFileRangeError:
-                return self.error(request, 416)
-
-            except IOError:
-                msg = 'File not found: %s' % path
-                return self.error(request, 404, msg)
-
-            except Exception as e:
-                # As per spec, follow-through to a normal 200/sendfile.
-                pass
-
-        try:
-            response.content_length = st[6]
-            response.last_modified = date_time_string(st.st_mtime)
+            response.content_length = r.num_bytes_to_send
+            response.code = 206
+            response.message = 'Partial Content'
+            response.content_range = r.content_range
+        else:
+            response.content_length = file_size
             response.code = 200
             response.message = 'OK'
-            if request.command == 'GET':
-                response.sendfile = True
-                before = bytes(response)
-                with open(path, 'rb') as f:
-                    fs = os.fstat(f.fileno())
-                    response.content_length = fs.st_size
-                    response.last_modified = date_time_string(fs.st_mtime)
-                    response.transport.write(before)
 
-                    # Enqueue a task to the event loop to handle the file sending
-                    asyncio.create_task(self._sendfile_task(request, f))
-            else:
-                return
+        # Sanity check our content length is below 2GB.
+        assert response.content_length < 2**31
 
-        except FileTooLargeError:
-            msg = "File too large (>2GB); use ranged requests."
-            return self.error(request, 413, msg)
+        response.last_modified = last_modified
 
-        except IOError:
+        # Now open the file and either read the entire contents, or the
+        # specific range requested.
+        try:
+            with open(path, 'rb') as f:
+                if request.range:
+                    f.seek(r.first_byte)
+                    file_content = f.read(r.num_bytes_to_send)
+                else:
+                    file_content = f.read()
+        except FileNotFoundError:
             msg = 'File not found: %s' % path
             return self.error(request, 404, msg)
+        except IOError as e:
+            msg = f'Error reading file: {e}'
+            return self.error(request, 500, msg)
 
-    async def _sendfile_task(self, request, file):
-        logging.debug("Sending file: %s", file)
-        response = request.response
-        try:
-            sock = request.transport.get_extra_info('socket')
-            os.sendfile(
-                sock.fileno(),
-                file.fileno(),
-                None,
-                os.fstat(file.fileno()).st_size
-            )
-        except Exception as e:
-            logging.error("Error sending file: %s", e)
-        finally:
-            request.transport.close()
+        response.body = file_content
+        self.send_response(request)
 
     def error(self, request, code, message=None):
         r = RESPONSES[code]
@@ -1024,7 +1079,7 @@ class HttpServer(asyncio.Protocol):
 
     def send_response(self, request):
         response = request.response
-        if response and not response.sendfile:
+        if response:
             response_bytes = bytes(response)
             logging.debug(f"Sending {len(response_bytes)} byte(s) response.")
             request.transport.write(response_bytes)
@@ -1090,13 +1145,6 @@ def parse_arguments():
         help='The protocol class to use for the server.',
     )
     parser.add_argument(
-        '--server-mode',
-        type=str,
-        default='MULTI_ACCEPT_SOCKET',
-        choices=['SINGLE_ACCEPT_SOCKET', 'MULTI_ACCEPT_SOCKET'],
-        help='The server mode to use.',
-    )
-    parser.add_argument(
         '--listen-backlog',
         type=int,
         default=100,
@@ -1137,13 +1185,6 @@ def start_event_loop(args: argparse.Namespace, protocol):
         debug=args.debug,
     )
 
-def main_threaded_single_accept(args: argparse.Namespace, protocol):
-    """
-    This is the main function for the server when it is running in
-    multi-threaded mode with a single accept socket.
-    """
-    raise NotImplementedError
-
 def main_threaded_multi_accept(args: argparse.Namespace, protocol):
     """
     This is the main function for the server when it is running in
@@ -1182,10 +1223,7 @@ def main():
             ),
             debug=args.debug,
         )
-    elif args.server_mode == 'SINGLE_ACCEPT_SOCKET':
-        main_threaded_single_accept(args, protocol)
     else:
-        assert args.server_mode == 'MULTI_ACCEPT_SOCKET', args.server_mode
         main_threaded_multi_accept(args, protocol)
 
 if __name__ == '__main__':
