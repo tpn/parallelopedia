@@ -2,14 +2,13 @@
 # Imports
 #===============================================================================
 import os
+import asyncio
 import logging
 import argparse
 
 from parallelopedia.http.server import (
-    HttpServer,
+    HttpApp,
     Request,
-    Response,
-    RangedRequest,
 
     router,
     make_routes,
@@ -45,28 +44,60 @@ def get_class_from_string(class_name : str) -> type:
         for comp in parts[1:]:
             module = getattr(module, comp)
     else:
-        module = globals()
+        module = globals()[class_name]
     return module
 
 #===============================================================================
 # Classes
 #===============================================================================
-class App:
-    pass
-
-class Gpt1(App):
+class Gpt1(HttpApp):
     routes = make_routes()
     route = router(routes)
+
+    async def generate_response(self, request : Request) -> None:
+        with open(__file__, 'rb') as f:
+            data = f.read()
+
+        assert isinstance(data, bytes)
+
+        transport = self.server.transport
+        response = request.response
+
+        response.code = 200
+        response.message = 'OK'
+        response.chunked_response = True
+        response.content_type = 'text/plain'
+
+        response.enable_tcp_nodelay()
+
+        # This will just be the header for now.
+        response_bytes = bytes(response)
+        transport.write(response_bytes)
+
+        await asyncio.sleep(0)
+
+        text = data
+        for c in text:
+            response.send_chunk(c)
+            await asyncio.sleep(0.2)
+
+        # Send the termination chunk.
+        response.send_chunk(None, transport)
+
+        response.disable_tcp_nodelay()
 
     @route
     def foo(self, request : Request, name : str, **kwds : dict) -> None:
         logging.debug(f'foo: {name}')
+        loop = asyncio.get_running_loop()
+        loop.create_task(self.generate_response(request))
 
     @route
     def bar(self, request : Request, name : str, **kwds : dict) -> None:
+        response = request.response
         logging.debug(f'bar: {name}')
 
-class Gpt2(App):
+class Gpt2(HttpApp):
     routes = make_routes()
     route = router(routes)
 
@@ -114,10 +145,16 @@ def parse_arguments():
         help='Number of threads to use.',
     )
     parser.add_argument(
-        '--protocol-classes',
+        '--protocol-class',
+        type=str,
+        default='parallelopedia.http.server.HttpServer',
+        help='The protocol class to use for the HTTP server.',
+    )
+    parser.add_argument(
+        '--app-classes',
         nargs='+',
         default=['Gpt1', 'Gpt2'],
-        help='Space-separated list of protocol classes.',
+        help='Space-separated list of HTTP application classes.',
     )
     parser.add_argument(
         '--listen-backlog',
@@ -128,7 +165,86 @@ def parse_arguments():
     args = parser.parse_args()
     return args
 
+async def main_async(args: argparse.Namespace, protocol_class : type,
+                     *protocol_args : Tuple) -> None:
+    """
+    This is the main function for the server when it is running in
+    asynchronous mode.  It will create a server instance and then
+    call serve_forever() on it.
+
+    Arguments:
+        args (argparse.Namespace): Supplies the command-line arguments.
+        protocol_class (type): Supplies the protocol class to use.
+        protocol_args (tuple): Supplies the arguments to pass to the
+            protocol class constructor.
+
+    """
+    loop = asyncio.get_running_loop()
+
+    server = await loop.create_server(
+        lambda: protocol_class(*protocol_args),
+        args.ip,
+        args.port,
+        backlog=args.listen_backlog,
+        reuse_address=True,
+        reuse_port=True,
+    )
+
+    async with server:
+        await server.serve_forever()
+
+def start_event_loop(args: argparse.Namespace, protocol_class : type,
+                     *protocol_args : Tuple) -> None:
+    """
+    This function will start the asyncio event loop and run the main_async()
+    function.  It is intended to be the target of a threading.Thread.
+
+    Arguments:
+        args (argparse.Namespace): Supplies the command-line arguments.
+        protocol_class (type): Supplies the protocol class to use.
+        protocol_args (tuple): Supplies the arguments to pass to the
+            protocol class constructor.
+    """
+    asyncio.run(
+        main_async(
+            args,
+            protocol_class,
+            *protocol_args,
+        ),
+        debug=args.debug,
+    )
+
+def main_threaded_multi_accept(args: argparse.Namespace, protocol_class :
+                               type, *protocol_args : Tuple) -> None:
+    """
+    This is the main function for the server when it is running in
+    multi-threaded mode with multiple accept sockets.  Each thread
+    will have its own asyncio loop issue a create_server() call for
+    the given host/port and protocol.
+
+    Arguments:
+        args (argparse.Namespace): Supplies the command-line arguments.
+        protocol_class (type): Supplies the protocol class to use.
+        protocol_args (tuple): Supplies the arguments to pass to the
+            protocol class constructor.
+    """
+    import threading
+    threads = []
+    for i in range(args.threads):
+        thread = threading.Thread(
+            target=start_event_loop,
+            args=(args, protocol_class, *protocol_args),
+        )
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
+
 def main():
+    """
+    Main entry point for parallelopedia.server module.
+    """
     args = parse_arguments()
 
     logging.basicConfig(level=args.log_level)
@@ -137,12 +253,25 @@ def main():
         format='%(asctime)s - %(levelname)s - %(message)s',
     )
 
-    protocol_classes = [
+    app_classes = [
         get_class_from_string(class_name)
-            for class_name in args.protocol_classes
+            for class_name in args.app_classes
     ]
 
-    print(protocol_classes)
+    protocol_class = get_class_from_string(args.protocol_class)
+    protocol_args = (app_classes,)
+
+    if args.threads == 1:
+        asyncio.run(
+            main_async(
+                args,
+                protocol_class,
+                *protocol_args,
+            ),
+            debug=args.debug,
+        )
+    else:
+        main_threaded_multi_accept(args, protocol_class, *protocol_args)
 
 
 if __name__ == '__main__':

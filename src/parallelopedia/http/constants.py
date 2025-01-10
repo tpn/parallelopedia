@@ -28,13 +28,14 @@ HTTP/1.1 %(code)d %(message)s\r
 Server: %(server)s\r
 Date: %(date)s\r
 Accept-Ranges: bytes\r
-Content-Type: %(content_type)s\r\n%(content_length)s\r
+Content-Type: %(content_type)s\r
+Access-Control-Allow-Origin: *\r
 %(other_headers)s%(rn1)s%(rn2)s%(body)s"""
 
 DEFAULT_CONTENT_TYPE = "text/html;charset=utf-8"
 DEFAULT_ERROR_CONTENT_TYPE = "text/html;charset=utf-8"
 
-DEFAULT_SERVER_RESPONSE = 'PyParallel Web Server v0.1'
+DEFAULT_SERVER_RESPONSE = 'Parallelopedia Web Server v1.0'
 
 DIRECTORY_LISTING = """\
 <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"

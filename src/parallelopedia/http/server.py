@@ -7,6 +7,8 @@ import mmap
 import time
 import html
 import json
+import socket
+import datrie
 import string
 import urllib
 import asyncio
@@ -15,6 +17,12 @@ import logging
 import argparse
 import mimetypes
 import posixpath
+
+from typing import (
+    List,
+    Type,
+    Optional,
+)
 
 from functools import (
     partial,
@@ -30,9 +38,22 @@ from parallelopedia.http import (
     RESPONSES,
 )
 
+#===============================================================================
+# Aliases
+#===============================================================================
+url_unquote = urllib.parse.unquote
+html_escape = html.escape
+normpath = posixpath.normpath
+
+#===============================================================================
+# Globals
+#===============================================================================
 IS_WINDOWS = sys.platform == 'win32'
 IS_LINUX = sys.platform.startswith('linux')
 
+#===============================================================================
+# Glue
+#===============================================================================
 if not mimetypes.inited:
     mimetypes.init()
 
@@ -44,16 +65,15 @@ extensions_map.update({
     '.h': 'text/plain',
 })
 
-url_unquote = urllib.parse.unquote
-html_escape = html.escape
-normpath = posixpath.normpath
-
 allowed_url_characters = (
     string.ascii_letters +
     string.digits +
     '&#?/%_'
 )
 
+#===============================================================================
+# Helpers
+#===============================================================================
 def keep_alive_check(f):
     def decorator(*args):
         result = f(*args)
@@ -137,9 +157,6 @@ def date_time_string(timestamp=None):
 
 gmtime = date_time_string
 
-#===============================================================================
-# Misc Helpers
-#===============================================================================
 class NotTrie(dict):
     def longest_prefix_value(self, path):
         p = path[1:]
@@ -151,16 +168,11 @@ class NotTrie(dict):
         key = path[:ix+1]
         return self.get(key)
 
-def make_routes(allowed=None):
+def make_routes(allowed : Optional[str] = None) -> datrie.Trie:
     if not allowed:
         allowed = allowed_url_characters
-    try:
-        import datrie
-        make = lambda: datrie.Trie(allowed)
-    except ImportError:
-        make = lambda: NotTrie()
-
-    return make()
+    import datrie
+    return datrie.Trie(allowed)
 
 def router(routes=None):
     if routes is None:
@@ -172,6 +184,7 @@ def router(routes=None):
         _func = None
         _funcname = None
         _path = None
+        _target = None
         def __init__(self, func_or_path):
             if inspect.isfunction(func_or_path):
                 self.func = func_or_path
@@ -203,6 +216,14 @@ def router(routes=None):
             self.routes[self.path] = (self._funcname, self)
 
         @property
+        def target(self):
+            return self._target
+
+        @target.setter
+        def target(self, target):
+            self._target = target
+
+        @property
         def funcname(self):
             return self._funcname
 
@@ -219,6 +240,7 @@ def router(routes=None):
 
             obj = _args[0]
             request = _args[1]
+
             # This will be the full path received, minus query string and
             # fragment, e.g. '/offsets/Python'.
             path = request.path[len(self.path):]
@@ -371,6 +393,7 @@ class Response:
         'last_modified',
         'other_headers',
         'content_length',
+        'chunked_response',
         '_response',
     )
 
@@ -395,6 +418,7 @@ class Response:
         self.last_modified = None
         self.other_headers = []
         self.content_length = 0
+        self.chunked_response = False
         self._response = None
 
     def __bytes__(self):
@@ -404,7 +428,6 @@ class Response:
         code = self.code
         date = self.date
         server = self.server
-        explain = self.explain
         message = self.message
         content_type = self.content_type
 
@@ -422,15 +445,9 @@ class Response:
         if self.content_range:
             self.other_headers.append(self.content_range)
 
-        if self.other_headers:
-            other_headers = '\r\n'.join(self.other_headers)
-            rn1 = '\r\n'
-        else:
-            rn1 = ''
-            other_headers = ''
-
         bytes_body = None
         if body:
+            assert not self.chunked_response
             if isinstance(body, bytes):
                 bytes_body = body
                 body = None
@@ -442,12 +459,27 @@ class Response:
                 body = None
                 self.content_length = len(bytes_body) #+ len(rn2)
 
+        if self.chunked_response:
+            self.other_headers.append('Transfer-Encoding: chunked')
+
         if self.content_length:
+            assert not self.chunked_response
             content_length = 'Content-Length: %d' % self.content_length
+            self.other_headers.append(content_length)
+            rn2 = '\r\n'
+        elif self.chunked_response:
             rn2 = '\r\n'
         else:
             content_length = 'Content-Length: 0'
+            self.other_headers.append(content_length)
             rn2 = ''
+
+        if self.other_headers:
+            other_headers = '\r\n'.join(self.other_headers)
+            rn1 = '\r\n'
+        else:
+            rn1 = ''
+            other_headers = ''
 
         kwds = {
             'code': code,
@@ -455,7 +487,6 @@ class Response:
             'server': server,
             'date': date,
             'content_type': content_type,
-            'content_length': content_length,
             'other_headers': other_headers,
             'rn1': rn1,
             'rn2': rn2,
@@ -469,15 +500,35 @@ class Response:
         self._response = response
         return response
 
+    def _set_sockopt(self, option, value):
+        if self.transport:
+            sock = self.transport.get_extra_info('socket')
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
+
+    def enable_tcp_nodelay(self):
+        self._set_sockopt(socket.TCP_NODELAY, 1)
+
+    def disable_tcp_nodelay(self):
+        self._set_sockopt(socket.TCP_NODELAY, 0)
+
+    def send_chunk(self, chunk_or_byte):
+        if chunk_or_byte is not None:
+            if isinstance(chunk_or_byte, int):
+                chunk = f'1\r\n{chr(chunk_or_byte)}\r\n'
+            else:
+                chunk = f'{len(chunk_or_byte):X}\r\n{chunk_or_byte}\r\n'
+        else:
+            chunk = '0\r\n\r\n'
+        chunk = chunk.encode('UTF-8', 'replace')
+        self.transport.write(chunk)
+
     def _to_dict(self):
         return {
             k: getattr(self, k)
                 for k in self.__slots__
                     if k not in ('transport', 'request')
         }
-
-    #def __repr__(self):
-    #    return repr(self._to_dict())
 
     def _to_json(self):
         return json.dumps(self._to_dict())
@@ -607,18 +658,60 @@ class RangedRequest:
             self.file_size,
         )
 
-#routes = make_routes()
-#route = router(routes)
+    def set_file_size_safe(self, file_size: int,
+                           server_instance: 'HttpServer') -> bool:
+        """
+        Sets the file size for the ranged request.  If an exception is raised,
+        an appropriate error response will be dispatched via the error()
+        method of the server instance.
+
+        Args:
+
+            file_size (int): Supplies the size of the file in bytes.
+
+            server_instance (HttpServer): Supplies the server instance to use
+                for error dispatching.
+
+        Returns:
+
+            True if the file size was set successfully, otherwise False.
+            If False, `server_instance.error()` will have been called with the
+            appropriate error code and message.
+
+        """
+        try:
+            self.set_file_size(file_size)
+            return True
+        except InvalidRangeRequest:
+            server_instance.error(
+                server_instance,
+                416,
+                "Invalid range request",
+            )
+        except RangeRequestTooLarge:
+            server_instance.error(
+                server_instance,
+                413,
+                "Range too large (>2GB)",
+            )
+        return False
+
+class HttpApp:
+    def __init__(self, server : 'HttpServer'):
+        self.server = server
 
 class HttpServer(asyncio.Protocol):
-    #routes = routes
-    routes = None
 
-    use_sendfile = True
-    #throughput = True
-    #low_latency = True
-    #max_sync_send_attempts = 100
-    #max_sync_recv_attempts = 100
+    def __init__(self, app_classes : Optional[List[Type[HttpApp]]] = None):
+        self.routes = make_routes()
+        self.apps = []
+        for app_class in app_classes:
+            app = app_class(server=self)
+            for (_, value) in app.routes.items():
+                (_, func) = value
+                func.target = app
+            self.apps.append(app)
+            self.routes.update(app.routes)
 
     def connection_made(self, transport):
         logging.debug("Connection made with transport: %s", transport)
@@ -629,14 +722,15 @@ class HttpServer(asyncio.Protocol):
         request = Request(self.transport, data)
         self.process_new_request(request)
 
-        if not request.keep_alive:
-            request.transport.close()
+        if False:
+            if not request.keep_alive:
+                request.transport.close()
 
-        response = request.response
-        if not response or response.sendfile:
-            return None
-        else:
-            return bytes(response)
+            response = request.response
+            if not response or response.sendfile:
+                return None
+            else:
+                return bytes(response)
 
     def process_new_request(self, request):
         raw = request.data
@@ -788,8 +882,9 @@ class HttpServer(asyncio.Protocol):
         try:
             value = self.routes.longest_prefix_value(request.path)
             if value:
-                (funcname, func) = value
-                return lambda r: func(self, r)
+                (_, func) = value
+                target = func.target
+                return lambda r: func(target, r)
         except (KeyError, AttributeError):
             pass
 
@@ -942,12 +1037,8 @@ class HttpServer(asyncio.Protocol):
             return self.error(request, 500, "No range request")
 
         r = request.range
-        try:
-            r.set_file_size(file_size)
-        except InvalidRangeRequest:
-            return self.error(request, 416)
-        except RangeRequestTooLarge:
-            return self.error(request, 413, "Range too large (>2GB)")
+        if not r.set_file_size_safe(file_size, self):
+            return
 
         response = request.response
         response.content_length = r.num_bytes_to_send
@@ -1206,14 +1297,16 @@ def main_threaded_multi_accept(args: argparse.Namespace, protocol):
         thread.join()
 
 
-def main():
-    args = parse_arguments()
-    # Set up logging configuration
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format='%(asctime)s - %(levelname)s - %(message)s',
-    )
-    protocol = get_class_from_string(args.protocol_class)
+def main(args : Optional[argparse.Namespace] = None):
+    if args is None:
+        args = parse_arguments()
+
+        # Set up logging configuration
+        logging.basicConfig(
+            level=getattr(logging, args.log_level),
+            format='%(asctime)s - %(levelname)s - %(message)s',
+        )
+        protocol = get_class_from_string(args.protocol_class)
 
     if args.threads == 1:
         asyncio.run(

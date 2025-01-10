@@ -54,6 +54,9 @@ from os.path import (
     normpath,
 )
 
+import mwparserfromhell as mwp
+import mwcomposerfromhell as mwc
+
 def join_path(*args):
     return abspath(normpath(join(*args)))
 
@@ -271,11 +274,12 @@ def exact_title(title):
 #===============================================================================
 # Classes
 #===============================================================================
-routes = make_routes()
-route = router(routes)
+#routes = make_routes()
+#route = router(routes)
 
-class WikiServer(HttpServer):
-    routes = routes
+class WikiServerMixin:
+    routes = make_routes()
+    route = router(routes)
 
     use_mmap = True
 
@@ -323,7 +327,46 @@ class WikiServer(HttpServer):
             return self.error(request, 400, "Ranged-request required.")
         else:
             request.response.content_type = 'text/xml; charset=utf-8'
-            return self.sendfile(request, WIKI_XML_PATH)
+            return self.ranged_sendfile_mmap(
+                request,
+                WIKI_XML_MMAP,
+                WIKI_XML_SIZE,
+                WIKI_XML_LAST_MODIFIED,
+            )
+
+    @route
+    def generate(self, request, prompt, **kwds):
+        if not prompt:
+            return self.error(request, 400, "Missing prompt")
+
+        loop = asyncio.get_running_loop()
+        self.loop.create_task(self.do_generate(request, prompt, **kwds))
+
+    async def do_generate(self, request, prompt, **kwds):
+        pass
+
+    @route
+    def html(self, request, *args, **kwds):
+        rr = request.range
+        if not rr:
+            return self.error(request, 400, "Ranged-request required.")
+
+        if not rr.set_file_size_safe(WIKI_XML_SIZE, self):
+            return
+
+        response = request.response
+        response.code = 200
+        response.message = 'OK'
+        response.content_type = 'text/html; charset=UTF-8'
+
+        file_content = WIKI_XML_MMAP[rr.first_byte:rr.last_byte+1]
+
+        code = mwp.parse(file_content)
+        html = mwc.compose(code)
+        response.content_length = len(html)
+        response.body = html
+
+        return self.send_response(request)
 
     @route
     def hello(self, request, *args, **kwds):
@@ -343,7 +386,6 @@ class WikiServer(HttpServer):
         return self.send_response(
             json_serialization(request, items)
         )
-
 
     @route
     def json(self, request, *args, **kwds):
