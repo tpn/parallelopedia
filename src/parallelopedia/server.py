@@ -40,9 +40,12 @@ def get_class_from_string(class_name : str) -> type:
     parts = class_name.split('.')
     module_name = '.'.join(parts[:-1])
     class_name = parts[-1]
-    module = __import__(module_name)
-    for comp in parts[1:]:
-        module = getattr(module, comp)
+    if module_name:
+        module = __import__(module_name)
+        for comp in parts[1:]:
+            module = getattr(module, comp)
+    else:
+        module = globals()
     return module
 
 #===============================================================================
