@@ -4,72 +4,55 @@ afforded by PyParallel: the ability to load large reference data structures
 into memory, and then query them as part of incoming request processing in
 parallel.
 """
-#===============================================================================
-# Imports
-#===============================================================================
-import os
-import time
+
 import glob
 import json
-import mmap
-import socket
-import datrie
-import string
 import logging
+import mmap
+
+# =============================================================================
+# Imports
+# =============================================================================
+import os
+import socket
+import string
 import threading
+import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from os.path import abspath, dirname, exists, join, normpath
+from typing import List, Tuple
+
+import datrie
+#import mwcomposerfromhell as mwc
+#import mwparserfromhell as mwp
 import numpy as np
-from typing import (
-    List,
-    Tuple,
-)
-
-from collections import (
-    defaultdict,
-)
-
-from numpy import (
-    uint64,
-)
-
-from concurrent.futures import (
-    ThreadPoolExecutor,
-    as_completed,
-)
+from numpy import uint64
 
 from parallelopedia.http.server import (
-    router,
-    make_routes,
-    date_time_string,
-
-    Request,
+    HttpApp,
     HttpServer,
     RangedRequest,
+    Request,
+    date_time_string,
+    make_routes,
+    router,
 )
 
-from os.path import (
-    join,
-    exists,
-    abspath,
-    dirname,
-    normpath,
+from .util import (
+    join_path,
 )
 
-import mwparserfromhell as mwp
-import mwcomposerfromhell as mwc
-
-def join_path(*args):
-    return abspath(normpath(join(*args)))
-
-#===============================================================================
+# =============================================================================
 # Configurables -- Change These!
-#===============================================================================
+# =============================================================================
 # Change this to the directory containing the downloaded files.
-#DATA_DIR = r'd:\data'
+# DATA_DIR = r'd:\data'
 DATA_DIR = join_path(dirname(__file__), '../../data')
 
-#===============================================================================
+# =============================================================================
 # Constants
-#===============================================================================
+# =============================================================================
 
 # This file is huge when unzipped -- ~53GB.  Although, granted, it is the
 # entire Wikipedia in a single file.  The bz2 version is much smaller, but
@@ -102,19 +85,21 @@ TITLES_OFFSETS_NPY_PATH = join_path(DATA_DIR, 'titles_offsets.npy')
 
 PARTITIONS = 127
 
-#===============================================================================
+# =============================================================================
 # Aliases
-#===============================================================================
+# =============================================================================
 uint64_7 = uint64(7)
 uint64_11 = uint64(11)
 
-#===============================================================================
+
+# =============================================================================
 # Trie Helpers
-#===============================================================================
-def get_wiki_tries_in_dir(directory : str) -> List[str]:
+# =============================================================================
+def get_wiki_tries_in_dir(directory: str) -> List[str]:
     return sorted(glob.glob(f'{directory}/wiki-*.trie'))
 
-def get_wiki_tries(directory : str) -> dict:
+
+def get_wiki_tries(directory: str) -> dict:
     paths = get_wiki_tries_in_dir(directory)
     basename = os.path.basename
     result = {}
@@ -127,7 +112,8 @@ def get_wiki_tries(directory : str) -> dict:
         result[char] = path
     return result
 
-def load_trie(path : str) -> datrie.Trie:
+
+def load_trie(path: str) -> datrie.Trie:
     msg_prefix = f'[{threading.get_native_id()}]'
     start = time.perf_counter()
     logging.debug(f'{msg_prefix} Loading {path}...')
@@ -137,9 +123,9 @@ def load_trie(path : str) -> datrie.Trie:
     logging.debug(f'{msg_prefix} Loaded {path} in {elapsed:.4f} seconds.')
     return trie
 
+
 def load_wiki_tries_parallel(
-    directory : str,
-    max_threads : int = 0
+    directory: str, max_threads: int = 0
 ) -> List[datrie.Trie]:
 
     if max_threads < 1:
@@ -156,7 +142,7 @@ def load_wiki_tries_parallel(
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
         futures = {
             executor.submit(load_trie, path): (char, path)
-                for (char, path) in paths_by_first_char.items()
+            for (char, path) in paths_by_first_char.items()
         }
         for future in as_completed(futures):
             (char, path) = futures[future]
@@ -172,9 +158,10 @@ def load_wiki_tries_parallel(
     print(f'Loaded {num_tries} tries in {elapsed:.4f} seconds.')
     return tries
 
-#===============================================================================
+
+# =============================================================================
 # Globals
-#===============================================================================
+# =============================================================================
 WIKI_XML_FILE = open(WIKI_XML_PATH, 'rb')
 WIKI_XML_STAT = os.fstat(WIKI_XML_FILE.fileno())
 WIKI_XML_SIZE = WIKI_XML_STAT.st_size
@@ -197,10 +184,11 @@ TITLE_OFFSETS = np.load(TITLES_OFFSETS_NPY_PATH)
 # Now load all of the tries in parallel.
 TITLE_TRIES = load_wiki_tries_parallel(DATA_DIR)
 
-#===============================================================================
+
+# =============================================================================
 # Misc Helpers
-#===============================================================================
-def json_serialization(request : Request = None, obj : dict = None) -> Request:
+# =============================================================================
+def json_serialization(request: Request = None, obj: dict = None) -> Request:
     """
     Helper method for converting a dict `obj` into a JSON response for the
     incoming `request`.
@@ -217,6 +205,7 @@ def json_serialization(request : Request = None, obj : dict = None) -> Request:
 
     return request
 
+
 def text_serialization(request=None, text=None):
     if not request:
         request = Request(transport=None, data=None)
@@ -231,9 +220,9 @@ def text_serialization(request=None, text=None):
     return request
 
 
-#===============================================================================
+# =============================================================================
 # Offset Helpers
-#===============================================================================
+# =============================================================================
 def get_page_offsets_for_key(search_string: str) -> List[Tuple[str, int, int]]:
     """
     Given a search string, return a list of tuples of the form
@@ -251,33 +240,39 @@ def get_page_offsets_for_key(search_string: str) -> List[Tuple[str, int, int]]:
     if not items:
         return results
     offsets = TITLE_OFFSETS
-    for (key, value) in items:
+    for key, value in items:
         v = value[0]
-        o = uint64(v if v > 0 else v*-1)
+        o = uint64(v if v > 0 else v * -1)
         ix = offsets.searchsorted(o, side='right')
-        results.append((key, int(o-uint64_7), int(offsets[ix]-uint64_11)))
+        results.append((key, int(o - uint64_7), int(offsets[ix] - uint64_11)))
     return results
 
-#===============================================================================
+
+# =============================================================================
 # Web Helpers
-#===============================================================================
+# =============================================================================
 def exact_title(title):
     if len(title) < 1:
         return json.dumps([])
 
     titles = TITLE_TRIES[ord(title[0])]
     if title in titles:
-        return json.dumps([[title, ] + [ t for t in titles[title] ]])
+        return json.dumps(
+            [
+                [
+                    title,
+                ]
+                + [t for t in titles[title]]
+            ]
+        )
     else:
         return json.dumps([])
 
-#===============================================================================
-# Classes
-#===============================================================================
-#routes = make_routes()
-#route = router(routes)
 
-class WikiServerMixin:
+# =============================================================================
+# Classes
+# =============================================================================
+class WikiApp(HttpApp):
     routes = make_routes()
     route = router(routes)
 
@@ -294,11 +289,11 @@ class WikiServerMixin:
             return self.error(request, 404)
 
         o = titles[name][0]
-        o = uint64(o if o > 0 else o*-1)
+        o = uint64(o if o > 0 else o * -1)
         offsets = TITLE_OFFSETS
         ix = offsets.searchsorted(o, side='right')
-        start = int(o-uint64_7)
-        end = int(offsets[ix]-uint64_11)
+        start = int(o - uint64_7)
+        end = int(offsets[ix] - uint64_11)
         range_request = '%d-%d' % (start, end)
         request.range = RangedRequest(range_request)
         request.response.content_type = 'text/xml; charset=utf-8'
@@ -335,17 +330,6 @@ class WikiServerMixin:
             )
 
     @route
-    def generate(self, request, prompt, **kwds):
-        if not prompt:
-            return self.error(request, 400, "Missing prompt")
-
-        loop = asyncio.get_running_loop()
-        self.loop.create_task(self.do_generate(request, prompt, **kwds))
-
-    async def do_generate(self, request, prompt, **kwds):
-        pass
-
-    @route
     def html(self, request, *args, **kwds):
         rr = request.range
         if not rr:
@@ -359,7 +343,7 @@ class WikiServerMixin:
         response.message = 'OK'
         response.content_type = 'text/html; charset=UTF-8'
 
-        file_content = WIKI_XML_MMAP[rr.first_byte:rr.last_byte+1]
+        file_content = WIKI_XML_MMAP[rr.first_byte : rr.last_byte + 1]
 
         code = mwp.parse(file_content)
         html = mwc.compose(code)
@@ -370,7 +354,7 @@ class WikiServerMixin:
 
     @route
     def hello(self, request, *args, **kwds):
-        j = { 'args': args, 'kwds': kwds }
+        j = {'args': args, 'kwds': kwds}
         return json_serialization(request, j)
 
     @route
@@ -383,9 +367,7 @@ class WikiServerMixin:
             return self.error(request, 404)
 
         items = titles.items(name)
-        return self.send_response(
-            json_serialization(request, items)
-        )
+        return self.send_response(json_serialization(request, items))
 
     @route
     def json(self, request, *args, **kwds):
@@ -399,4 +381,5 @@ class WikiServerMixin:
             text_serialization(request, text='Hello, World!')
         )
 
-# vim:set ts=8 sw=4 sts=4 tw=78 et:                                            #
+
+# vim:set ts=8 sw=4 sts=4 tw=78 et:                                          #

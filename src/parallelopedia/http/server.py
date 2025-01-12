@@ -1,32 +1,25 @@
-#===============================================================================
+# ===============================================================================
 # Imports
-#===============================================================================
-import os
-import sys
-import mmap
-import time
-import html
-import json
-import socket
-import datrie
-import string
-import urllib
-import asyncio
-import inspect
-import logging
+# ===============================================================================
 import argparse
+import asyncio
+import html
+import inspect
+import json
+import logging
 import mimetypes
+import mmap
+import os
 import posixpath
+import socket
+import string
+import sys
+import time
+import urllib
+from functools import partial
+from typing import List, Optional, Type
 
-from typing import (
-    List,
-    Type,
-    Optional,
-)
-
-from functools import (
-    partial,
-)
+import datrie
 
 from parallelopedia.http import (
     DEFAULT_CONTENT_TYPE,
@@ -38,46 +31,45 @@ from parallelopedia.http import (
     RESPONSES,
 )
 
-#===============================================================================
+# ===============================================================================
 # Aliases
-#===============================================================================
+# ===============================================================================
 url_unquote = urllib.parse.unquote
 html_escape = html.escape
 normpath = posixpath.normpath
 
-#===============================================================================
+# ===============================================================================
 # Globals
-#===============================================================================
+# ===============================================================================
 IS_WINDOWS = sys.platform == 'win32'
 IS_LINUX = sys.platform.startswith('linux')
 
-#===============================================================================
+# ===============================================================================
 # Glue
-#===============================================================================
+# ===============================================================================
 if not mimetypes.inited:
     mimetypes.init()
 
 extensions_map = mimetypes.types_map.copy()
-extensions_map.update({
-    '': 'application/octet-stream', # Default
-    '.py': 'text/plain',
-    '.c': 'text/plain',
-    '.h': 'text/plain',
-})
-
-allowed_url_characters = (
-    string.ascii_letters +
-    string.digits +
-    '&#?/%_'
+extensions_map.update(
+    {
+        '': 'application/octet-stream',  # Default
+        '.py': 'text/plain',
+        '.c': 'text/plain',
+        '.h': 'text/plain',
+    }
 )
 
-#===============================================================================
+allowed_url_characters = string.ascii_letters + string.digits + '&#?/%_'
+
+
+# ===============================================================================
 # Helpers
-#===============================================================================
+# ===============================================================================
 def keep_alive_check(f):
     def decorator(*args):
         result = f(*args)
-        (obj, transport) = (args[0:2])
+        (obj, transport) = args[0:2]
         if not obj.keep_alive:
             transport.close()
         return result
@@ -85,6 +77,7 @@ def keep_alive_check(f):
 
 def _quote_html(html):
     return html.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 
 def translate_path(path, base=None):
     """Translate a /-separated PATH to the local filename syntax.
@@ -95,8 +88,8 @@ def translate_path(path, base=None):
 
     """
     # abandon query parameters
-    path = path.split('?',1)[0]
-    path = path.split('#',1)[0]
+    path = path.split('?', 1)[0]
+    path = path.split('#', 1)[0]
     path = normpath(url_unquote(path))
     words = path.split('/')
     words = filter(None, words)
@@ -110,6 +103,7 @@ def translate_path(path, base=None):
             continue
         path = os.path.join(path, word)
     return path
+
 
 def guess_type(path):
     """Guess the type of a file.
@@ -135,11 +129,24 @@ def guess_type(path):
     else:
         return extensions_map['']
 
+
 weekdayname = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-monthname = [None,
-             'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-             'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+monthname = [
+    None,
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+]
 
 
 def date_time_string(timestamp=None):
@@ -152,10 +159,14 @@ def date_time_string(timestamp=None):
         day,
         monthname[month],
         year,
-        hh, mm, ss
+        hh,
+        mm,
+        ss,
     )
 
+
 gmtime = date_time_string
+
 
 class NotTrie(dict):
     def longest_prefix_value(self, path):
@@ -165,14 +176,17 @@ class NotTrie(dict):
         ix = p.find('/')
         if ix == -1:
             return self.get(path)
-        key = path[:ix+1]
+        key = path[: ix + 1]
         return self.get(key)
 
-def make_routes(allowed : Optional[str] = None) -> datrie.Trie:
+
+def make_routes(allowed: Optional[str] = None) -> datrie.Trie:
     if not allowed:
         allowed = allowed_url_characters
     import datrie
+
     return datrie.Trie(allowed)
+
 
 def router(routes=None):
     if routes is None:
@@ -185,6 +199,7 @@ def router(routes=None):
         _funcname = None
         _path = None
         _target = None
+
         def __init__(self, func_or_path):
             if inspect.isfunction(func_or_path):
                 self.func = func_or_path
@@ -243,7 +258,7 @@ def router(routes=None):
 
             # This will be the full path received, minus query string and
             # fragment, e.g. '/offsets/Python'.
-            path = request.path[len(self.path):]
+            path = request.path[len(self.path) :]
 
             # In the case of '/offsets/Python', that'll leave us with '/Python',
             # and we want to lop off the slash.  In the case of, say, '/stats',
@@ -267,7 +282,8 @@ def router(routes=None):
             try:
                 result = self.func(obj, request, *args, **request.query)
                 return result
-            except TypeError:
+            except TypeError as e:
+                print(f'Error: {e}')
                 try:
                     # Try without query string **kwds.
                     return self.func(obj, request, *args)
@@ -293,6 +309,7 @@ def router(routes=None):
 
     return _decorator
 
+
 def json_serialization(request=None, obj=None):
     transport = None
     if not request:
@@ -309,6 +326,7 @@ def json_serialization(request=None, obj=None):
 
     return request
 
+
 def text_response(request=None, text=None):
     if not request:
         request = Request(transport=None, data=None)
@@ -322,6 +340,7 @@ def text_response(request=None, text=None):
 
     return request
 
+
 def html_response(request, text):
     response = request.response
     response.code = 200
@@ -331,12 +350,14 @@ def html_response(request, text):
 
     return request
 
+
 def quote_html(html):
     return html.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-#===============================================================================
+
+# ===============================================================================
 # Classes
-#===============================================================================
+# ===============================================================================
 class Options(dict):
     def __init__(self, values=dict()):
         assert isinstance(values, dict)
@@ -348,8 +369,10 @@ class Options(dict):
         except KeyError:
             return None
 
+
 class InvalidHeaderText(Exception):
     pass
+
 
 class Headers(dict):
     def __init__(self, text):
@@ -360,7 +383,7 @@ class Headers(dict):
             ix = line.find(b':')
             if ix == -1:
                 raise InvalidHeaderText()
-            (key, value) = (line[:ix], line[ix+1:])
+            (key, value) = (line[:ix], line[ix + 1 :])
             key = key.lower().decode()
             value = value.lstrip().decode()
             self[key] = value
@@ -371,6 +394,7 @@ class Headers(dict):
             return self[name]
         except KeyError:
             return None
+
 
 class Response:
     __slots__ = (
@@ -453,11 +477,11 @@ class Response:
                 body = None
 
                 if not self.content_length:
-                    self.content_length = len(bytes_body) #+ len(rn2)
+                    self.content_length = len(bytes_body)  # + len(rn2)
             elif not self.content_length:
                 bytes_body = body.encode('UTF-8', 'replace')
                 body = None
-                self.content_length = len(bytes_body) #+ len(rn2)
+                self.content_length = len(bytes_body)  # + len(rn2)
 
         if self.chunked_response:
             self.other_headers.append('Transfer-Encoding: chunked')
@@ -529,8 +553,8 @@ class Response:
     def _to_dict(self):
         return {
             k: getattr(self, k)
-                for k in self.__slots__
-                    if k not in ('transport', 'request')
+            for k in self.__slots__
+            if k not in ('transport', 'request')
         }
 
     def _to_json(self):
@@ -575,8 +599,8 @@ class Request:
     def _to_dict(self):
         return {
             k: getattr(self, k)
-                for k in self.__slots__
-                    if k not in ('transport', 'response')
+            for k in self.__slots__
+            if k not in ('transport', 'response')
         }
 
     def _to_json(self):
@@ -586,15 +610,16 @@ class Request:
 class InvalidRangeRequest(BaseException):
     pass
 
+
 class RangeRequestTooLarge(BaseException):
     pass
+
 
 class RangedRequest:
     __slots__ = (
         'first_byte',
         'last_byte',
         'suffix_length',
-
         # These are filled in when set_file_size() is called.
         'offset',
         'num_bytes_to_send',
@@ -613,9 +638,11 @@ class RangedRequest:
         self.content_range = None
 
         try:
-            r = requested_range.replace(' ', '')        \
-                               .replace('bytes', '')    \
-                               .replace('=', '')
+            r = (
+                requested_range.replace(' ', '')
+                .replace('bytes', '')
+                .replace('=', '')
+            )
 
             if r.startswith('-'):
                 self.suffix_length = int(r[1:])
@@ -643,10 +670,10 @@ class RangedRequest:
             self.first_byte = file_size - self.suffix_length
 
         else:
-            if self.first_byte > file_size-1:
+            if self.first_byte > file_size - 1:
                 raise InvalidRangeRequest
 
-            if not self.last_byte or self.last_byte > file_size-1:
+            if not self.last_byte or self.last_byte > file_size - 1:
                 self.last_byte = file_size - 1
 
         self.num_bytes_to_send = (self.last_byte - self.first_byte) + 1
@@ -661,8 +688,9 @@ class RangedRequest:
             self.file_size,
         )
 
-    def set_file_size_safe(self, file_size: int,
-                           server_instance: 'HttpServer') -> bool:
+    def set_file_size_safe(
+        self, file_size: int, server_instance: 'HttpServer'
+    ) -> bool:
         """
         Sets the file size for the ranged request.  If an exception is raised,
         an appropriate error response will be dispatched via the error()
@@ -699,18 +727,20 @@ class RangedRequest:
             )
         return False
 
+
 class HttpApp:
-    def __init__(self, server : 'HttpServer'):
+    def __init__(self, server: 'HttpServer'):
         self.server = server
+
 
 class HttpServer(asyncio.Protocol):
 
-    def __init__(self, app_classes : Optional[List[Type[HttpApp]]] = None):
+    def __init__(self, app_classes: Optional[List[Type[HttpApp]]] = None):
         self.routes = make_routes()
         self.apps = []
         for app_class in app_classes:
             app = app_class(server=self)
-            for (_, value) in app.routes.items():
+            for _, value in app.routes.items():
                 (_, func) = value
                 func.target = app
             self.apps.append(app)
@@ -740,7 +770,7 @@ class HttpServer(asyncio.Protocol):
         ix = raw.find(b'\r\n')
         if ix == -1:
             return self.error(request, 400, "Line too long")
-        (requestline, rest) = (raw[:ix], raw[ix+2:])
+        (requestline, rest) = (raw[:ix], raw[ix + 2 :])
         words = requestline.split()
         num_words = len(words)
         if num_words == 3:
@@ -817,7 +847,9 @@ class HttpServer(asyncio.Protocol):
             if '&' in qs:
                 pairs = qs.split('&')
             else:
-                pairs = [ qs, ]
+                pairs = [
+                    qs,
+                ]
 
             for pair in pairs:
                 # Discard anything that isn't in key=value format.
@@ -851,7 +883,9 @@ class HttpServer(asyncio.Protocol):
         if h.range:
             if ',' in h.range:
                 # Don't permit multiple ranges.
-                return self.error(request, 400, "Multiple ranges not supported")
+                return self.error(
+                    request, 400, "Multiple ranges not supported"
+                )
 
             # But for anything else, the HTTP spec says to fall through and
             # process as per normal, so we just blow away the h.range header
@@ -1001,10 +1035,13 @@ class HttpServer(asyncio.Protocol):
         response.body = output
         return self.send_response(request)
 
-    def ranged_sendfile_mmap(self, request : Request,
-                             memory_map : mmap.mmap,
-                             file_size : int,
-                             last_modified : str) -> None:
+    def ranged_sendfile_mmap(
+        self,
+        request: Request,
+        memory_map: mmap.mmap,
+        file_size: int,
+        last_modified: str,
+    ) -> None:
         """
         Sends a ranged request to the client using a memory-mapped file.
 
@@ -1055,11 +1092,11 @@ class HttpServer(asyncio.Protocol):
         # achieve this via TCP_CORK and sendfile(), but it's not as clean.
         # As we're using memory-mapped files, we can just send the headers
         # and the file content in one go.
-        file_content = memory_map[r.first_byte:r.last_byte+1]
+        file_content = memory_map[r.first_byte : r.last_byte + 1]
         response.body = file_content
         self.send_response(request)
 
-    def sendfile(self, request : Request, path : str) -> None:
+    def sendfile(self, request: Request, path: str) -> None:
         """
         Sends a file to the client.
 
@@ -1078,15 +1115,15 @@ class HttpServer(asyncio.Protocol):
         else:
             return self._sendfile_fallback(request, path)
 
-    def _sendfile_windows(self, request : Request, path : str) -> None:
+    def _sendfile_windows(self, request: Request, path: str) -> None:
         # Todo: use an optimal TransmitFile() implementation.
         return self._sendfile_fallback(request, path)
 
-    def _sendfile_posix(self, request : Request, path : str) -> None:
+    def _sendfile_posix(self, request: Request, path: str) -> None:
         # Todo: use an optimal sendfile() implementation.
         return self._sendfile_fallback(request, path)
 
-    def _sendfile_fallback(self, request : Request, path : str) -> None:
+    def _sendfile_fallback(self, request: Request, path: str) -> None:
         response = request.response
         response.content_type = guess_type(path)
 
@@ -1159,9 +1196,9 @@ class HttpServer(asyncio.Protocol):
         response.explain = r[1]
 
         response.body = DEFAULT_ERROR_MESSAGE % {
-            'code' : code,
-            'message' : message,
-            'explain' : response.explain,
+            'code': code,
+            'message': message,
+            'explain': response.explain,
         }
 
         return self.send_response(request)
@@ -1197,8 +1234,9 @@ class HttpServer(asyncio.Protocol):
 
     @classmethod
     def merge(cls, other):
-        for (path, value) in other.routes.items():
+        for path, value in other.routes.items():
             cls.routes[path] = value
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Run the HTTP server.')
@@ -1246,6 +1284,7 @@ def parse_arguments():
     )
     return parser.parse_args()
 
+
 def get_class_from_string(class_name):
     parts = class_name.split('.')
     module_name = '.'.join(parts[:-1])
@@ -1254,6 +1293,7 @@ def get_class_from_string(class_name):
     for comp in parts[1:]:
         module = getattr(module, comp)
     return module
+
 
 async def main_async(args: argparse.Namespace, protocol):
     loop = asyncio.get_running_loop()
@@ -1270,14 +1310,13 @@ async def main_async(args: argparse.Namespace, protocol):
     async with server:
         await server.serve_forever()
 
+
 def start_event_loop(args: argparse.Namespace, protocol):
     asyncio.run(
-        main_async(
-            args,
-            protocol
-        ),
+        main_async(args, protocol),
         debug=args.debug,
     )
+
 
 def main_threaded_multi_accept(args: argparse.Namespace, protocol):
     """
@@ -1287,6 +1326,7 @@ def main_threaded_multi_accept(args: argparse.Namespace, protocol):
     the given host/port and protocol.
     """
     import threading
+
     threads = []
     for i in range(args.threads):
         thread = threading.Thread(
@@ -1300,7 +1340,7 @@ def main_threaded_multi_accept(args: argparse.Namespace, protocol):
         thread.join()
 
 
-def main(args : Optional[argparse.Namespace] = None):
+def main(args: Optional[argparse.Namespace] = None):
     if args is None:
         args = parse_arguments()
 
@@ -1313,14 +1353,12 @@ def main(args : Optional[argparse.Namespace] = None):
 
     if args.threads == 1:
         asyncio.run(
-            main_async(
-                args,
-                protocol
-            ),
+            main_async(args, protocol),
             debug=args.debug,
         )
     else:
         main_threaded_multi_accept(args, protocol)
+
 
 if __name__ == '__main__':
     main()

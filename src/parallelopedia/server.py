@@ -1,40 +1,26 @@
-#===============================================================================
+# =============================================================================
 # Imports
-#===============================================================================
-import os
+# =============================================================================
+import argparse
 import asyncio
 import logging
-import argparse
+import os
+from typing import List, Optional, Tuple
 
-from parallelopedia.http.server import (
-    HttpApp,
-    Request,
-
-    router,
-    make_routes,
-)
-
-from typing import (
-    List,
-    Tuple,
-    Optional,
-)
-
-from .util import (
+from parallelopedia.http.server import HttpApp, Request, make_routes, router
+from parallelopedia.util import (
     get_class_from_string,
+    get_classes_from_strings_parallel,
 )
 
-#===============================================================================
-# Helpers
-#===============================================================================
-#===============================================================================
+# =============================================================================
 # Classes
-#===============================================================================
+# =============================================================================
 class Gpt1(HttpApp):
     routes = make_routes()
     route = router(routes)
 
-    async def generate_response(self, request : Request) -> None:
+    async def generate_response(self, request: Request) -> None:
         with open(__file__, 'rb') as f:
             data = f.read()
 
@@ -67,31 +53,20 @@ class Gpt1(HttpApp):
         response.disable_tcp_nodelay()
 
     @route
-    def foo(self, request : Request, name : str, **kwds : dict) -> None:
+    def foo(self, request: Request, name: str, **kwds: dict) -> None:
         logging.debug(f'foo: {name}')
         loop = asyncio.get_running_loop()
         loop.create_task(self.generate_response(request))
 
     @route
-    def bar(self, request : Request, name : str, **kwds : dict) -> None:
+    def bar(self, request: Request, name: str, **kwds: dict) -> None:
         response = request.response
         logging.debug(f'bar: {name}')
 
-class Gpt2(HttpApp):
-    routes = make_routes()
-    route = router(routes)
 
-    @route
-    def cat(self, request : Request, name : str, **kwds : dict) -> None:
-        logging.debug(f'cat: {name}')
-
-    @route
-    def dog(self, request : Request, name : str, **kwds : dict) -> None:
-        logging.debug(f'dog: {name}')
-
-#===============================================================================
+# =============================================================================
 # Main
-#===============================================================================
+# =============================================================================
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Run the HTTP server.')
     parser.add_argument(
@@ -133,7 +108,10 @@ def parse_arguments():
     parser.add_argument(
         '--app-classes',
         nargs='+',
-        default=['Gpt1', 'Gpt2'],
+        default=[
+            'parallelopedia.gpt2.Gpt2App',
+            'parallelopedia.wiki.WikiApp',
+        ],
         help='Space-separated list of HTTP application classes.',
     )
     parser.add_argument(
@@ -145,8 +123,10 @@ def parse_arguments():
     args = parser.parse_args()
     return args
 
-async def main_async(args: argparse.Namespace, protocol_class : type,
-                     *protocol_args : Tuple) -> None:
+
+async def main_async(
+    args: argparse.Namespace, protocol_class: type, *protocol_args: Tuple
+) -> None:
     """
     This is the main function for the server when it is running in
     asynchronous mode.  It will create a server instance and then
@@ -173,8 +153,10 @@ async def main_async(args: argparse.Namespace, protocol_class : type,
     async with server:
         await server.serve_forever()
 
-def start_event_loop(args: argparse.Namespace, protocol_class : type,
-                     *protocol_args : Tuple) -> None:
+
+def start_event_loop(
+    args: argparse.Namespace, protocol_class: type, *protocol_args: Tuple
+) -> None:
     """
     This function will start the asyncio event loop and run the main_async()
     function.  It is intended to be the target of a threading.Thread.
@@ -194,8 +176,10 @@ def start_event_loop(args: argparse.Namespace, protocol_class : type,
         debug=args.debug,
     )
 
-def main_threaded_multi_accept(args: argparse.Namespace, protocol_class :
-                               type, *protocol_args : Tuple) -> None:
+
+def main_threaded_multi_accept(
+    args: argparse.Namespace, protocol_class: type, *protocol_args: Tuple
+) -> None:
     """
     This is the main function for the server when it is running in
     multi-threaded mode with multiple accept sockets.  Each thread
@@ -209,6 +193,7 @@ def main_threaded_multi_accept(args: argparse.Namespace, protocol_class :
             protocol class constructor.
     """
     import threading
+
     threads = []
     for i in range(args.threads):
         thread = threading.Thread(
@@ -221,22 +206,22 @@ def main_threaded_multi_accept(args: argparse.Namespace, protocol_class :
     for thread in threads:
         thread.join()
 
+
 def main():
     """
     Main entry point for parallelopedia.server module.
     """
     args = parse_arguments()
 
-    logging.basicConfig(level=args.log_level)
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format='%(asctime)s - %(levelname)s - %(message)s',
     )
 
-    app_classes = [
-        get_class_from_string(class_name)
-            for class_name in args.app_classes
-    ]
+    # Use multiple threads to load the application classes.  As we construct
+    # expensive objects in the bodies of the modules (e.g. LLM models, large
+    # numpy arrays, datries, etc.), we want to parallelize this work.
+    app_classes = get_classes_from_strings_parallel(args.app_classes)
 
     protocol_class = get_class_from_string(args.protocol_class)
     protocol_args = (app_classes,)
@@ -257,4 +242,4 @@ def main():
 if __name__ == '__main__':
     main()
 
-# vim:set ts=8 sw=4 sts=4 tw=78 et:                                            #
+# vim:set ts=8 sw=4 sts=4 tw=78 et:                                          #

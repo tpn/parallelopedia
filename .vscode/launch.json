@@ -70,7 +70,7 @@
                 "--port",
                 "4444",
                 "--threads",
-                "1",
+                "4",
                 "--log-level",
                 "DEBUG",
                 "--debug",
