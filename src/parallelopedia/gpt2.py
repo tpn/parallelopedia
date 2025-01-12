@@ -5,32 +5,34 @@ specifically, the `train_gpt2.py` file.
 #===============================================================================
 # Imports
 #===============================================================================
-import os
-import math
 import time
 import asyncio
-import inspect
-import numpy as np
+import logging
+import tiktoken
+from dataclasses import dataclass
+
+from typing import (
+    Optional,
+)
+
 import torch
 import torch.nn as nn
-import tiktoken
-import logging
 from torch.nn import functional as F
-from dataclasses import dataclass
+
+from .util import (
+    ElapsedTimer,
+)
 
 #===============================================================================
 # Globals
 #===============================================================================
-
-device = "cpu"
-if torch.cuda.is_available():
-    device = "cuda"
-
-enc = tiktoken.get_encoding("gpt2")
+DEFAULT_MANUAL_SEED = 42
 
 #===============================================================================
 # Setup
 #===============================================================================
+
+# Use bfloat16 for matmul precision where possible.
 torch.set_float32_matmul_precision('high')
 
 #===============================================================================
@@ -103,10 +105,14 @@ class GPTConfig:
 
     Attributes:
         block_size (int): Maximum sequence length.
+
         vocab_size (int): Number of tokens. Includes 50,000 BPE merges,
             256 byte tokens, and 1 <|endoftext|> token.
+
         n_layer (int): Number of layers.
+
         n_head (int): Number of attention heads.
+
         n_embd (int): Embedding dimension.
     """
     block_size: int = 1024
@@ -117,9 +123,24 @@ class GPTConfig:
 
 class GPT(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config : GPTConfig, device : str, manual_seed : int):
+        """
+        Initializes a GPT model.
+
+        Arguments:
+
+            config (GPTConfig): Supplies the configuration for the model.
+
+            device (str): Supplies the device to use for the model, e.g. "cpu"
+                or "cuda".
+
+            manual_seed (int): Supplies the manual seed to use for the model.
+
+        """
         super().__init__()
         self.config = config
+        self.device = device
+        self.manual_seed = manual_seed
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -128,12 +149,17 @@ class GPT(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-
-        # weight sharing scheme
         self.transformer.wte.weight = self.lm_head.weight
-
-        # init params
         self.apply(self._init_weights)
+
+        # Obtain the tokenizer for GPT2, and resolve the stop token.
+        enc = tiktoken.get_encoding("gpt2")
+        stop_string = '<|endoftext|>'
+        stop_token = enc.n_vocab - 1
+        actual = enc.decode([stop_token])
+        assert actual == stop_string, f"expected {stop_string}, got {actual}"
+        self.enc = enc
+        self.stop_token = stop_token
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -167,36 +193,65 @@ class GPT(nn.Module):
         return logits, loss
 
     @classmethod
-    def from_local_pretrained(cls, model_path: str, map_location: str = "cpu"):
+    def from_local_pretrained(cls, model_path: str,
+                              map_location: Optional[str] = None,
+                              manual_seed: Optional[int] = None):
         """
-        Load a GPT model from a local checkpoint file (e.g., 'log/model_19072.pt').
+        Load a GPT model from a local checkpoint file (e.g. 'model_19072.pt').
 
-        :param model_path: Path to the .pt checkpoint file.
-        :param map_location: Where to map the loaded tensor parameters.
-                            Typically "cpu" or "cuda:<device_id>".
+        Arguments:
+
+            model_path (str): Supplies the path to the .pt checkpoint file
+                that was produced by `torch.save()`.
+
+            map_location (str): Optionally supplies the device to map the
+                loaded tensor parameters to.  If None, "cuda" will be used
+                if available, otherwise "cpu".
+
+            manual_seed (int): Optionally supplies the manual seed to use for
+                the model.  If None, `DEFAULT_MANUAL_SEED` will be used.
+
         """
-        # Load the checkpoint.
-        with torch.serialization.safe_globals([GPTConfig]):
-            checkpoint = torch.load(model_path, map_location=map_location)
-
         # Extract the stored config.  This is the same GPTConfig instance that
         # was saved in 'train_gpt2.py'.
         config = checkpoint['config']
 
+        if manual_seed is None:
+            manual_seed = DEFAULT_MANUAL_SEED
+
+        if map_location is None:
+            if torch.cuda.is_available():
+                map_location = "cuda"
+            else:
+                map_location = "cpu"
+
+        timer = ElapsedTimer()
+
+        # Load the checkpoint.
+        with timer:
+            with torch.serialization.safe_globals([GPTConfig]):
+                checkpoint = torch.load(model_path, map_location=map_location)
+        logging.info(
+            f'Loaded {model_path} checkpoint in {timer.elapsed:.3f} seconds.'
+        )
+
         # Initialize a new GPT instance using the config.
-        model = cls(config)
+        model = cls(config, device=map_location, manual_seed=manual_seed)
 
         # Load in the state_dict containing all learned weights.
-        model.load_state_dict(checkpoint['model'])
+        with timer:
+            model.load_state_dict(checkpoint['model'])
+        logging.info(
+            f'Loaded model weights in {timer.elapsed:.3f} seconds.'
+        )
 
         # Set the model to eval mode.
         model.eval()
 
-        msg = (
+        logging.info(
             f"Loaded model from step {checkpoint['step']}, "
             f"val_loss {checkpoint['val_loss']}"
         )
-        logging.info(msg)
         return model
 
     def generate(self, text: str, max_length: int = 1024, top_k: int = 50) -> str:
@@ -211,22 +266,21 @@ class GPT(nn.Module):
         Returns:
             str: The generated text (including the initial prompt).
         """
-        self.eval()
-
-        # Obtain the tokenizer for GPT, and resolve the stop token.
-        enc = tiktoken.get_encoding("gpt2")
-        stop_string = '<|endoftext|>'
-        stop_token = enc.n_vocab - 1
-        actual = enc.decode([stop_token])
-        assert actual == stop_string, f"expected {stop_string}, got {actual}"
+        enc = self.enc
+        stop_token = self.stop_token
 
         # Encode prompt -> tensor of shape (1, T)
         tokens = enc.encode(text)
-        x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+
+        x = torch.tensor(
+            tokens,
+            dtype=torch.long,
+            device=self.device
+        ).unsqueeze(0)
 
         # Create a random generator for reproducibility.
         sample_rng = torch.Generator(device=device)
-        sample_rng.manual_seed(42)
+        sample_rng.manual_seed(self.manual_seed)
 
         # Generate tokens up to our max length, or until we hit the stop token.
         start = time.perf_counter()
@@ -244,10 +298,14 @@ class GPT(nn.Module):
             probs = F.softmax(logits, dim=-1)
 
             # Top-k sampling.
-            topk_probs, topk_indices = torch.topk(probs, k=top_k, dim=-1)  # (1, top_k)
+            topk_probs, topk_indices = torch.topk(probs, k=top_k, dim=-1)
 
             # Sample the next token.
-            next_idx = torch.multinomial(topk_probs, num_samples=1, generator=sample_rng)  # (1, 1)
+            next_idx = torch.multinomial(
+                topk_probs,
+                num_samples=1,
+                generator=sample_rng,
+            )
             next_token = torch.gather(topk_indices, -1, next_idx)                          # (1, 1)
 
             # If the next token is the stop token, we're done.
@@ -291,68 +349,121 @@ class GPT(nn.Module):
             str: The newly generated text token (decoded).
         """
 
-        self.eval()
+        enc = self.enc
+        stop_token = self.stop_token
 
-        # The GPT-2 tokenizer
-        enc = tiktoken.get_encoding("gpt2")
-        stop_string = "<|endoftext|>"
-        stop_token = enc.n_vocab - 1
-
-        # Encode the prompt -> (1, T)
+        # Encode the prompt -> tensor of shape (1, T)
         tokens = enc.encode(text)
-        x = torch.tensor(tokens, dtype=torch.long, device=self.device).unsqueeze(0)
+        x = torch.tensor(
+            tokens,
+            dtype=torch.long,
+            device=self.device
+        ).unsqueeze(0)
 
-        # We'll keep track of how many tokens we've generated,
-        # purely for debugging/logging.
-        generation_count = 0
-
-        # A RNG for reproducibility (optional).
         sample_rng = torch.Generator(device=self.device)
-        sample_rng.manual_seed(42)
+        sample_rng.manual_seed(self.manual_seed)
 
-        # Start generating
         start_time = time.perf_counter()
+        count = 0
         while x.size(1) < max_length:
-            generation_count += 1
-
-            # Because PyTorch calls are blocking, we do them in small steps:
+            count += 1
             with torch.no_grad():
                 # Forward pass, ignoring the returned loss.
-                logits, _ = self(x)
+                (logits, _) = self(x)
 
-            # logits at the last position -> shape (1, vocab_size)
+            # Take the logits at the last time-step (shape: (1, vocab_size)).
             logits = logits[:, -1, :]
 
-            # Softmax to get probabilities
+            # Convert to probabilities.
             probs = F.softmax(logits, dim=-1)
 
-            # Top-k sampling
+            # Top-k sampling.
             topk_probs, topk_indices = torch.topk(probs, k=top_k, dim=-1)
-            next_idx = torch.multinomial(topk_probs, num_samples=1, generator=sample_rng)
-            next_token = torch.gather(topk_indices, -1, next_idx)  # shape (1, 1)
 
-            # Check for the stop token
+            # Sample the next token.
+            next_idx = torch.multinomial(
+                topk_probs,
+                num_samples=1,
+                generator=sample_rng,
+            )
+            next_token = torch.gather(topk_indices, -1, next_idx)                          # (1, 1)
+
+            # If the next token is the stop token, we're done.
             if next_token.item() == stop_token:
                 break
 
-            # Append token to current sequence
+            # Append token to current sequence.  Although we only yield a
+            # singular decoded token below, we still need to keep track of
+            # the entire sequence for subsequent generation steps.
             x = torch.cat((x, next_token), dim=1)
 
-            # Decode just the new token, and yield it
+            # Decode the newly-generated token, and yield it.
             new_text_fragment = enc.decode([next_token.item()])
             yield new_text_fragment
 
-            # Give control back to the event loop to avoid blocking
-            # for too long. This ensures other tasks can run, too.
+            # Yield control back to the event loop before continuing generation.
             await asyncio.sleep(0)
 
-        # Print or log some stats
         elapsed = time.perf_counter() - start_time
-        msg = (
-            f"[generate_async_for] Generated {generation_count} tokens in "
-            f"{elapsed:.2f} seconds (~{generation_count / elapsed:.2f} tok/s)"
+        logging.debug(
+            f"[generate_async_for] Generated {count} tokens in "
+            f"{elapsed:.2f} seconds (~{count / elapsed:.2f} tok/s)"
         )
-        logging.debug(msg)
+
+class Gpt2App(HttpApp):
+    routes = make_routes()
+    route = router(routes)
+
+    def __init__(self, server : HttpServer, model : GPT) -> None:
+        super().__init__(server)
+        self.model = model
+
+    async def generate_response(self, request : Request, text : str,
+                                **kwds : Optional[dict] = None) -> None:
+        assert isinstance(data, bytes)
+
+        transport = self.server.transport
+        response = request.response
+
+        response.code = 200
+        response.message = 'OK'
+        response.chunked_response = True
+        response.content_type = 'text/plain'
+
+        # We want to enable TCP_NODELAY for the duration of the response.
+        # This ensures packets are sent immediately without any internal
+        # buffering.
+        response.enable_tcp_nodelay()
+
+        # Write the chunked header immediately.
+        response_bytes = bytes(response)
+        transport.write(response_bytes)
+
+        if kwds is None:
+            kwds = {}
+        max_length = min(kwds.get('max_length', 1024), 1024)
+        top_k = min(kwds.get('top_k', 50), 50)
+
+        generate_tokens = self.model.generate_async_for(
+            text,
+            max_length=max_length,
+            top_k=top_k,
+        )
+        async for decoded_token in generate_tokens:
+            response.send_chunk(decoded_token)
+
+        # Send the termination chunk.
+        response.end_chunks()
+
+        # Disable TCP_NODELAY now that the response is complete.
+        response.disable_tcp_nodelay()
+
+    @route
+    def generate(self, request : Request, text : str, **kwds : dict) -> None:
+        logging.debug(f'generate: {text}')
+        loop = asyncio.get_running_loop()
+        loop.create_task(self.generate_response(request))
+
 
 if __name__ == '__main__':
     import sys

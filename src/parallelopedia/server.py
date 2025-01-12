@@ -20,33 +20,13 @@ from typing import (
     Optional,
 )
 
+from .util import (
+    get_class_from_string,
+)
 
 #===============================================================================
 # Helpers
 #===============================================================================
-def get_class_from_string(class_name : str) -> type:
-    """
-    Obtains an instance of a class object from a string representation of the
-    class name, which may include the module name, e.g. `spam.eggs.Bacon`.
-
-    Arguments:
-        class_name (str): Supplies the name of the class.
-
-    Returns:
-        type: Returns the class object.
-
-    """
-    parts = class_name.split('.')
-    module_name = '.'.join(parts[:-1])
-    class_name = parts[-1]
-    if module_name:
-        module = __import__(module_name)
-        for comp in parts[1:]:
-            module = getattr(module, comp)
-    else:
-        module = globals()[class_name]
-    return module
-
 #===============================================================================
 # Classes
 #===============================================================================

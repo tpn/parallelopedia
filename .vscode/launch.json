@@ -1,0 +1,88 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Attach using Process Id",
+            "type": "debugpy",
+            "request": "attach",
+            "processId": "${command:pickProcess}"
+        },
+        {
+            "name": "parallelopedia.http.server.HttpServer",
+            "type": "debugpy",
+            "request": "launch",
+            "justMyCode": false,
+            "module": "parallelopedia.http.server",
+            "args": [
+                "--ip",
+                "0.0.0.0",
+                "--port",
+                "9999",
+                "--log-level",
+                "DEBUG",
+                "--debug"
+            ]
+        },
+        {
+            "name": "parallelopedia.http.server.HttpServer40",
+            "type": "debugpy",
+            "request": "launch",
+            "justMyCode": false,
+            "module": "parallelopedia.http.server",
+            "args": [
+                "--ip",
+                "0.0.0.0",
+                "--port",
+                "4444",
+                "--threads",
+                "40"
+            ]
+        },
+        {
+            "name": "WikiServer40",
+            "type": "debugpy",
+            "request": "launch",
+            "justMyCode": false,
+            "module": "parallelopedia.http.server",
+            "args": [
+                "--ip",
+                "0.0.0.0",
+                "--port",
+                "4444",
+                "--threads",
+                "40",
+                "--protocol-class",
+                "parallelopedia.wiki.WikiServer"
+            ]
+        },
+        {
+            "name": "Server1",
+            "type": "debugpy",
+            "request": "launch",
+            "justMyCode": false,
+            "module": "parallelopedia.server",
+            "pythonArgs": [
+                "-Xgil=0",
+            ],
+            "args": [
+                "--ip",
+                "0.0.0.0",
+                "--port",
+                "4444",
+                "--threads",
+                "1",
+                "--log-level",
+                "DEBUG",
+                "--debug",
+                "--protocol-class",
+                "parallelopedia.http.server.HttpServer"
+            ]
+        },
+        {
+            "name": "Python Debugger: Python File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}"
+        }
+    ]
+}

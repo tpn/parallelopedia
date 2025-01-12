@@ -523,6 +523,9 @@ class Response:
         chunk = chunk.encode('UTF-8', 'replace')
         self.transport.write(chunk)
 
+    def end_chunks(self):
+        self.send_chunk(None)
+
     def _to_dict(self):
         return {
             k: getattr(self, k)
