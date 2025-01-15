@@ -163,6 +163,9 @@ def get_classes_from_strings_parallel(class_names: List[str]) -> List[type]:
     max_workers = min(os.cpu_count(), len(class_names))
     results = []
     errors = []
+    logging.info(f'Loading {len(class_names)} classes in parallel...')
+    logging.info(f'Max workers: {max_workers}')
+    logging.info(f'Class names: {class_names}')
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(get_class_from_string, class_name): class_name

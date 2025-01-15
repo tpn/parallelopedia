@@ -7,22 +7,23 @@ This file is based on the `train_gpt2.py` file in Andrej Karpathy's
 # Imports
 # =============================================================================
 
-import os
-import itertools
 import asyncio
 import dataclasses
+import itertools
 import logging
+import os
 import random
 import string
-import time
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from os.path import dirname
 from typing import Dict, List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import tiktoken
 import torch
+import torch.jit
 import torch.nn as nn
 import torch.profiler
 from torch.nn import functional as F
@@ -594,12 +595,6 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         # idx is of shape (B, T)
         B, T = idx.size()
-        assert (
-            T <= self.config.block_size
-        ), (
-            f"Cannot forward sequence of length {T}, "
-            f"block size is only {self.config.block_size}"
-        )
 
         # Forward the token and position embeddings.
 
@@ -825,14 +820,45 @@ class Gpt2App(HttpApp):
     def init_once(cls):
         load_models()
 
+        # This doesn't work because torch.jit doesn't handle our
+        # async generator.
+        if False:
+            for (i, model) in enumerate(MODELS):
+                model.config = dataclasses.asdict(model.config)
+                timer = ElapsedTimer()
+                with timer:
+                    model = torch.jit.script(model)
+                    MODELS[i] = model
+                logging.info(
+                    f'JIT compiled model {i} in {timer.elapsed:.3f} seconds.'
+                )
+
+    def is_connected(self):
+        # server.transport will be severed when the client disconnects.
+        server = self.server
+        transport = None
+        try:
+            transport = server.transport
+        except AttributeError:
+            pass
+        return transport is not None
+
+    def write(self, response_bytes):
+        server = self.server
+        transport = None
+        try:
+            transport = server.transport
+        except AttributeError:
+            pass
+        if transport is not None:
+            transport.write(response_bytes)
+            return True
+        else:
+            return False
+
     async def generate_response(
         self, request: Request, text: str, **kwds: Dict
     ) -> None:
-
-        server = self.server
-        transport = server.transport
-        if not transport:
-            return
 
         response = request.response
 
@@ -850,10 +876,28 @@ class Gpt2App(HttpApp):
             seed = int(seed)
         else:
             seed = random.randint(0, 2**32 - 1)
+        device = kwds.get('device', None)
 
-        # Get a model.  If there are multiple models available, e.g. if we
-        # have multiple GPUs, this will balance the load a bit.
-        model = get_next_model()
+        model = None
+        if device is not None:
+            if device == 'cpu':
+                model = MODELS[-1]
+            elif device.startswith('cuda:'):
+                try:
+                    index = int(device[5:])
+                except ValueError:
+                    index = -1
+                if index < 0 or index >= NUM_GPUS:
+                    index = -1
+                if index != -1:
+                    model = MODELS[index]
+            elif device == 'cuda':
+                model = MODELS[random.randint(0, NUM_GPUS - 1)]
+
+        if not model:
+            # Get a model.  If there are multiple models available, e.g. if we
+            # have multiple GPUs, this will balance the load a bit.
+            model = get_next_model()
 
         response.other_headers.extend([
             f'X-Max-Length: {max_length}',
@@ -874,7 +918,9 @@ class Gpt2App(HttpApp):
 
         # Write the chunked header immediately.
         response_bytes = bytes(response)
-        transport.write(response_bytes)
+        if not self.write(response_bytes):
+            # Encountered a disconnect, return.
+            return
 
         # From herein, all data must be transferred to the client via chunked
         # encoding with `response.send_chunk()`.
@@ -894,11 +940,8 @@ class Gpt2App(HttpApp):
                 response.send_chunk(OOPS_NON_PRINTABLE_ENCOUNTERED)
                 break
 
-            # The HTTP server's `connection_lost()` will clear the server's
-            # transport member if the connection is lost.  If this happens,
-            # we can stop generating tokens.
-            transport = server.transport
-            if not transport:
+            # If the client has forcibly disconnected, terminate generation.
+            if not self.is_connected():
                 break
 
             # Otherwise, send the decoded token to the client via chunked
