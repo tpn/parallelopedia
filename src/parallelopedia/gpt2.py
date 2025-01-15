@@ -1,23 +1,32 @@
 """
-This file is based on Andrej Karpathy's `build-nanogpt` github repo;
-specifically, the `train_gpt2.py` file.
+This file is based on the `train_gpt2.py` file in Andrej Karpathy's
+`build-nanogpt` github repo.
 """
-import asyncio
-import logging
 
 # =============================================================================
 # Imports
 # =============================================================================
-import sys
+
+import os
+import itertools
+import asyncio
+import dataclasses
+import logging
+import random
+import string
 import time
+import threading
 from dataclasses import dataclass
 from os.path import dirname
 from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import tiktoken
 import torch
 import torch.nn as nn
+import torch.profiler
 from torch.nn import functional as F
+from torch.profiler import ProfilerActivity
 
 from parallelopedia.http.server import (
     HttpApp,
@@ -31,13 +40,104 @@ from parallelopedia.util import ElapsedTimer, join_path
 # =============================================================================
 # Configuration
 # =============================================================================
-DATA_DIR = join_path(dirname(__file__), '../../data')
+
+# If the environment variable PARALLELOPEDIA_DATA_DIR is set, use that instead.
+if 'PARALLELOPEDIA_DATA_DIR' in os.environ:
+    DATA_DIR = os.environ['PARALLELOPEDIA_DATA_DIR']
+else:
+    DATA_DIR = join_path(dirname(__file__), '../../data')
+
+# This is the model checkpoint file produced by `train_gpt2.py`.
+MODEL_CHECKPOINT = join_path(DATA_DIR, 'model_19072.pt')
+
+# If PARALLELOPEDIA_TORCH_PROFILE is set, profile model initialization.
+if 'PARALLELOPEDIA_TORCH_PROFILE' in os.environ:
+    TORCH_PROFILE_ACTIVITIES = [
+        ProfilerActivity.CPU,
+        ProfilerActivity.CUDA,
+    ]
+else:
+    TORCH_PROFILE_ACTIVITIES = None
+
+MODELS_LOCK = threading.Lock()
+
+# If PARALLELOPEDIA_CPU_ONLY is set, don't try and use CUDA.
+if 'PARALLELOPEDIA_CPU_ONLY' in os.environ or not torch.cuda.is_available():
+    CPU_ONLY = True
+    NUM_GPUS = 0
+    DEVICES = ['cpu']
+    MODELS = [None]
+
+    def load_models():
+        MODELS[0] = GPT.from_local_pretrained(
+            model_path=MODEL_CHECKPOINT,
+            map_location='cpu',
+            torch_profile_activities=TORCH_PROFILE_ACTIVITIES,
+        )
+
+    def get_next_model_random():
+        return MODELS[0]
+
+    def get_next_model_round_robin():
+        return MODELS[0]
+
+else:
+    # Use all GPUs if available, otherwise use CPU.
+    CPU_ONLY = False
+    NUM_GPUS = torch.cuda.device_count()
+    # Add a CPU version at the end.
+    TOTAL_MODELS = NUM_GPUS + 1
+    MODELS = [None] * TOTAL_MODELS
+    MODELS_ROUND_ROBIN = itertools.cycle(range(TOTAL_MODELS))
+
+    def get_next_model_random():
+        # Randomly select a GPU to use.
+        return MODELS[random.randint(0, TOTAL_MODELS - 1)]
+
+    def get_next_model_round_robin():
+        with MODELS_LOCK:
+            index = next(MODELS_ROUND_ROBIN)
+        return MODELS[index]
+
+    get_next_model = get_next_model_round_robin
+
+    def load_models():
+        max_workers = min(TOTAL_MODELS, os.cpu_count())
+        timer = ElapsedTimer()
+        with timer:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        GPT.from_local_pretrained,
+                        model_path=MODEL_CHECKPOINT,
+                        map_location=f'cuda:{i}',
+                        torch_profile_activities=TORCH_PROFILE_ACTIVITIES,
+                    ): i for i in range(NUM_GPUS)
+                }
+                # Add the CPU model.
+                futures[executor.submit(
+                    GPT.from_local_pretrained,
+                    model_path=MODEL_CHECKPOINT,
+                    map_location='cpu',
+                    torch_profile_activities=TORCH_PROFILE_ACTIVITIES,
+                )] = NUM_GPUS
+                for future in as_completed(futures):
+                    i = futures[future]
+                    model = future.result()
+                    MODELS[i] = model
+        msg = (
+            f'Loaded model on {NUM_GPUS} GPU(s) and 1 CPU in '
+            f'{timer.elapsed:.3f} seconds.'
+        )
+        logging.info(msg)
 
 # =============================================================================
 # Globals
 # =============================================================================
-MODEL_CHECKPOINT = join_path(DATA_DIR, 'model_19072.pt')
-MODEL_CHECKPOINT2 = join_path(DATA_DIR, 'model_19072.pt2')
+PRINTABLE = set(c for c in string.printable)
+OOPS_NON_PRINTABLE_ENCOUNTERED = (
+    'Oops! Non-printable token encountered.  Generation terminated.'
+)
 DEFAULT_MANUAL_SEED = 42
 
 # =============================================================================
@@ -51,17 +151,39 @@ torch.set_float32_matmul_precision('high')
 # Classes
 # =============================================================================
 
+# N.B. We have simple "no-init" overrides for nn.Embedding and nn.Linear which
+#      skip the default initialization routines, significantly reducing the
+#      time to load the model by avoiding uniform and random distribution
+#      initialization.  As we immediately load all the weights from the model
+#      checkpoint straight after creating the model, we don't need the default
+#      initialization routines.
+
+
+class NoInitEmbedding(nn.Embedding):
+    def reset_parameters(self):
+        # Skip default uniform initialization.
+        pass
+
+
+class NoInitLinear(nn.Linear):
+    def reset_parameters(self):
+        # Skip default Kaiming initialization.
+        pass
+
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
-        # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        # Key, query, value projections for all heads, but in a batch.
+        self.c_attn = NoInitLinear(config.n_embd, 3 * config.n_embd)
+
+        # Output projection.
+        self.c_proj = NoInitLinear(config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
-        # regularization
+
+        # Regularization.
         self.n_head = config.n_head
         self.n_embd = config.n_embd
 
@@ -104,9 +226,9 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.c_fc = NoInitLinear(config.n_embd, 4 * config.n_embd)
         self.gelu = nn.GELU(approximate='tanh')
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj = NoInitLinear(4 * config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
@@ -137,6 +259,7 @@ class GPTConfig:
     Configuration class for GPT model.
 
     Attributes:
+
         block_size (int): Maximum sequence length.
 
         vocab_size (int): Number of tokens.  GPT2 from huggingface has a
@@ -163,50 +286,152 @@ class GPTConfig:
     n_embd: int = 768
 
 
+@dataclass
+class GPTCheckpoint:
+    """
+    Checkpoint class for GPT model.
+
+    Mandatory Attributes:
+
+        model (dict): The model state_dict.
+
+        step (int): The step number.
+
+        val_loss (float): The validation loss.
+
+        config (GPTConfig): The configuration.
+    """
+    model: dict
+    step: int
+    val_loss: float
+    config: GPTConfig
+
+    @classmethod
+    def load(cls, checkpoint_path: str, device: str) -> "GPTCheckpoint":
+        """
+        Load a checkpoint from a file.
+
+        Args:
+
+            checkpoint_path (str): Supplies the path to the checkpoint file.
+
+            device (str): Supplies the device to use for the model.
+
+        Returns:
+
+            GPTCheckpoint: A new GPTCheckpoint instance.
+
+        """
+        data = torch.load(checkpoint_path, map_location=device)
+        checkpoint = cls(
+            model=data["model"],
+            step=data["step"],
+            val_loss=data["val_loss"],
+            config=GPTConfig(**data["config"]),
+        )
+        return checkpoint
+
+    def save(self, checkpoint_path: str) -> None:
+        """
+        Save the checkpoint to a file.
+
+        Args:
+
+            checkpoint_path (str): Supplies the path to the checkpoint file.
+        """
+        # N.B. We save config as a raw dictionary to avoid pickling issues
+        #      with object namespaces when reloading.
+        data = {
+            "model": self.model,
+            "step": self.step,
+            "val_loss": self.val_loss,
+            "config": dataclasses.asdict(self.config),
+        }
+        torch.save(data, checkpoint_path)
+
+    def save_parallel(self, checkpoint_path_prefix: str,
+                      num_threads: int) -> None:
+        pass
+
+
 class GPT(nn.Module):
 
-    def __init__(self, config: GPTConfig, device: str, manual_seed: int):
+    def __init__(self, checkpoint: GPTCheckpoint,
+                 device: Optional[str] = None,
+                 manual_seed: Optional[int] = None,
+                 torch_profile_activities: Optional[List[type]] = None):
         """
         Initializes a GPT model.
 
         Arguments:
 
-            config (GPTConfig): Supplies the configuration for the model.
+            checkpoint (GPTCheckpoint): Supplies a checkpoint from which the
+                model will be loaded.
 
-            device (str): Supplies the device to use for the model, e.g. "cpu"
-                or "cuda".
+            device (str): Optionally supplies the device to use for the model,
+                e.g. "cpu" or "cuda".  If None, "cuda" will be used if
+                available, otherwise "cpu".
 
-            manual_seed (int): Supplies the manual seed to use for the model.
+            manual_seed (int): Optionally supplies the manual seed to use for
+                generation.
 
+            torch_profile_activities (list): Optionally supplies a list of
+                torch.profiler.ProfilerActivity to profile.  This will apply
+                for transformer initialization and model weight loading.  The
+                torch_profile_init_transformer and torch_profile_load_state
+                attributes will be set to the resulting profiler objects.
         """
         super().__init__()
-        self.config = config
+
+        if device is None:
+            if CPU_ONLY:
+                device = 'cpu'
+            else:
+                device = 'cuda'
+
+        assert isinstance(checkpoint.config, GPTConfig), (
+            'checkpoint.config must be an instance of GPTConfig.'
+        )
+        self.config = checkpoint.config
         self.device = device
         self.manual_seed = manual_seed
+        self.torch_profile_activities = torch_profile_activities or []
+        self.torch_profile_init_transformer = None
+        self.torch_profile_load_state = None
+        # Populated by the from_local_pretrained() classmethod.
+        self.torch_profile_load = None
+
+        self.printable = set(c for c in string.printable)
 
         timer = ElapsedTimer()
-        with timer:
-            self.transformer = nn.ModuleDict(
-                dict(
-                    wte=nn.Embedding(config.vocab_size, config.n_embd),
-                    wpe=nn.Embedding(config.block_size, config.n_embd),
-                    h=nn.ModuleList(
-                        [Block(config) for _ in range(config.n_layer)]
-                    ),
-                    ln_f=nn.LayerNorm(config.n_embd),
-                )
-            )
-            self.lm_head = nn.Linear(
-                config.n_embd,
-                config.vocab_size,
-                bias=False,
-            )
-            self.transformer.wte.weight = self.lm_head.weight
-        logging.info(f'Initialized GPT model in {timer.elapsed:.3f} seconds.')
 
         with timer:
-            self.apply(self._init_weights)
-        logging.info(f'Initialized weights in {timer.elapsed:.3f} seconds.')
+            if not self.torch_profile_activities:
+                self._init_transformer()
+            else:
+                with torch.profiler.profile(
+                    activities=self.torch_profile_activities,
+                    with_stack=True,
+                ) as prof:
+                    self._init_transformer()
+                self.torch_profile_init_transformer = prof
+
+        msg = f'Initialized GPT model in {timer.elapsed:.3f} seconds.'
+        logging.info(msg)
+
+        with timer:
+            if not self.torch_profile_activities:
+                self.load_state_dict(checkpoint.model)
+            else:
+                with torch.profiler.profile(
+                    activities=self.torch_profile_activities,
+                    with_stack=True,
+                ) as prof:
+                    self.load_state_dict(checkpoint.model)
+                self.torch_profile_load_state = prof
+
+        msg = f'Loaded model weights in {timer.elapsed:.3f} seconds.'
+        logging.info(msg)
 
         # Obtain the tokenizer for GPT2, and resolve the stop token.
         enc = tiktoken.get_encoding("gpt2")
@@ -217,12 +442,58 @@ class GPT(nn.Module):
         self.enc = enc
         self.stop_token = stop_token
 
+        # Set to eval.
+        self.eval()
+
+    def print_profile(self):
+        if not self.torch_profile_activities:
+            raise RuntimeError('No profiler activities were set.')
+
+        sort_keys = ('cpu_time_total', 'cuda_time_total')
+
+        prof = self.torch_profile_init_transformer
+        if prof is not None:
+            print('=== [_init_transformer] ===')
+            for key in sort_keys:
+                print(f'--- {key} ---')
+                prof.key_averages().table(sort_by=key)
+
+        prof = self.torch_profile_load_state
+        if prof is not None:
+            print('=== [load_state_dict] ===')
+            for key in sort_keys:
+                print(f'--- {key} ---')
+                prof.key_averages().table(sort_by=key)
+
+    def _init_transformer(self):
+        """
+        Initialize the transformer.
+        """
+        config = self.config
+        self.transformer = nn.ModuleDict(
+            dict(
+                wte=NoInitEmbedding(config.vocab_size, config.n_embd),
+                wpe=NoInitEmbedding(config.block_size, config.n_embd),
+                h=nn.ModuleList(
+                    [Block(config) for _ in range(config.n_layer)]
+                ),
+                ln_f=nn.LayerNorm(config.n_embd),
+            )
+        )
+        self.lm_head = NoInitLinear(
+            config.n_embd,
+            config.vocab_size,
+            bias=False,
+        )
+        self.transformer.wte.weight = self.lm_head.weight
+
     @classmethod
     def from_local_pretrained(
         cls,
         model_path: str,
         map_location: Optional[str] = None,
-        manual_seed: Optional[int] = None
+        manual_seed: Optional[int] = None,
+        torch_profile_activities: Optional[List[type]] = None,
     ):
         """
         Load a GPT model from a local checkpoint file (e.g. 'model_19072.pt').
@@ -237,11 +508,15 @@ class GPT(nn.Module):
                 if available, otherwise "cpu".
 
             manual_seed (int): Optionally supplies the manual seed to use for
-                the model.  If None, `DEFAULT_MANUAL_SEED` will be used.
+                the model.  If None, a random seed will be used.
+
+            torch_profile_activities (list): Optionally supplies a list of
+                torch.profiler.ProfilerActivity to profile.
 
         """
         if manual_seed is None:
-            manual_seed = DEFAULT_MANUAL_SEED
+            # Use a random seed.
+            manual_seed = random.randint(0, 2**32 - 1)
 
         if map_location is None:
             if torch.cuda.is_available():
@@ -249,45 +524,63 @@ class GPT(nn.Module):
             else:
                 map_location = "cpu"
 
+        torch_profile_load = None
+
         timer = ElapsedTimer()
 
         # Load the checkpoint.
         with timer:
-            checkpoint = torch.load(model_path, map_location=map_location)
+            if not torch_profile_activities:
+                checkpoint = GPTCheckpoint.load(
+                    checkpoint_path=model_path,
+                    device=map_location,
+                )
+            else:
+                with torch.profiler.profile(
+                    activities=torch_profile_activities,
+                    with_stack=True,
+                ) as prof:
+                    checkpoint = GPTCheckpoint.load(
+                        checkpoint_path=model_path,
+                        device=map_location,
+                    )
+                torch_profile_load = prof
+
         logging.info(
             f'Loaded {model_path} checkpoint in {timer.elapsed:.3f} seconds.'
         )
 
-        config = GPTConfig(**checkpoint['config'])
-
         # Initialize a new GPT instance using the config.
         with timer:
-            model = cls(config, device=map_location, manual_seed=manual_seed)
+            model = cls(
+                checkpoint=checkpoint,
+                device=map_location,
+                manual_seed=manual_seed,
+                torch_profile_activities=torch_profile_activities,
+            )
         logging.info(f'Created GPT model in {timer.elapsed:.3f} seconds.')
 
-        # Load in the state_dict containing all learned weights.
-        with timer:
-            model.load_state_dict(checkpoint['model'])
-        logging.info(f'Loaded model weights in {timer.elapsed:.3f} seconds.')
+        if torch_profile_load is not None:
+            model.torch_profile_load = torch_profile_load
 
         device = map_location
         with timer:
             model.to(device)
-        logging.info(
-            f'Moved model to {device} in {timer.elapsed:.3f} seconds.'
-        )
-
-        # Set the model to eval mode.
-        model.eval()
+        msg = f'Moved model to {device} in {timer.elapsed:.3f} seconds.'
+        logging.info(msg)
 
         logging.info(
-            f"Loaded model from step {checkpoint['step']}, "
-            f"val_loss {checkpoint['val_loss']}"
+            f"Loaded model from step {checkpoint.step}, "
+            f"val_loss {checkpoint.val_loss}"
         )
         return model
 
-
     def _init_weights(self, module):
+        # N.B. This is only for new models that you plan on training, not
+        #      existing models you've already trained that you want to run
+        #      inference on.  It is a verbatim copy of the routine from the
+        #      `train_gpt2.py` script and included for posterity, despite us
+        #      never using it.
         if isinstance(module, nn.Linear):
             std = 0.02
             if hasattr(module, 'NANOGPT_SCALE_INIT'):
@@ -414,12 +707,14 @@ class GPT(nn.Module):
         )
         logging.debug(msg)
 
-        # Decode the generated tokens and return the text, including the prompt.
+        # Decode the generated tokens and return the text, including the
+        # prompt.
         output_tokens = x[0].tolist()
         return enc.decode(output_tokens)
 
     async def generate_async_for(
-        self, text: str, max_length: int = 1024, top_k: int = 50
+        self, text: str, max_length: int = 1024, top_k: int = 50,
+        seed: int = None,
     ):
         """
         Asynchronously generate text from the model, yielding tokens
@@ -433,9 +728,13 @@ class GPT(nn.Module):
 
             top_k (int): Number of tokens to consider at each generation step.
 
+            seed (int): Optionally supplies the manual seed to use for the
+                generator.  If None, the model's manual seed will be used.
+
         Yields:
 
-            str: The newly generated text token (decoded).
+            byte: The newly generated text token (decoded).  If -1, a
+            non-printable token was generated, and generation was terminated.
         """
 
         enc = self.enc
@@ -448,7 +747,14 @@ class GPT(nn.Module):
         ).unsqueeze(0)
 
         sample_rng = torch.Generator(device=self.device)
-        sample_rng.manual_seed(self.manual_seed)
+        if seed is None:
+            seed = self.manual_seed
+        sample_rng.manual_seed(seed)
+
+        logging.debug(
+            f'[generate_async_for] Starting generation loop for {text} '
+            f'with seed {seed}.'
+        )
 
         start_time = time.perf_counter()
         count = 0
@@ -476,7 +782,8 @@ class GPT(nn.Module):
             next_token = torch.gather(topk_indices, -1, next_idx)  # (1, 1)
 
             # If the next token is the stop token, we're done.
-            if next_token.item() == stop_token:
+            next_token_item = next_token.item()
+            if next_token_item == stop_token:
                 break
 
             # Append token to current sequence.  Although we only yield a
@@ -484,11 +791,19 @@ class GPT(nn.Module):
             # the entire sequence for subsequent generation steps.
             x = torch.cat((x, next_token), dim=1)
 
-            # Decode the newly-generated token, and yield it.
+            # Decode the newly-generated token.
             new_text_fragment = enc.decode([next_token.item()])
+
+            # If the next token isn't printable, terminate generation.  (With
+            # our locally-trained GPT2 124M model, this happens quite often.)
+            if not all(c in self.printable for c in new_text_fragment):
+                yield -1
+                break
+
             yield new_text_fragment
 
-            # Yield control back to the event loop before continuing generation.
+            # Yield control back to the event loop before continuing
+            # generation.
             await asyncio.sleep(0)
 
         elapsed = time.perf_counter() - start_time
@@ -497,11 +812,6 @@ class GPT(nn.Module):
             f"{elapsed:.2f} seconds (~{count / elapsed:.2f} tok/s)"
         )
 
-def load_model():
-    model = GPT.from_local_pretrained(MODEL_CHECKPOINT)
-    return model
-
-MODEL = load_model()
 
 class Gpt2App(HttpApp):
     routes = make_routes()
@@ -509,13 +819,21 @@ class Gpt2App(HttpApp):
 
     def __init__(self, server: HttpServer) -> None:
         super().__init__(server)
-        self.model = MODEL
+        self.printable = PRINTABLE
+
+    @classmethod
+    def init_once(cls):
+        load_models()
 
     async def generate_response(
         self, request: Request, text: str, **kwds: Dict
     ) -> None:
 
-        transport = self.server.transport
+        server = self.server
+        transport = server.transport
+        if not transport:
+            return
+
         response = request.response
 
         response.code = 200
@@ -523,10 +841,36 @@ class Gpt2App(HttpApp):
         response.chunked_response = True
         response.content_type = 'text/plain'
 
+        if kwds is None:
+            kwds = {}
+        max_length = min(int(kwds.get('max_length', 100)), 1024)
+        top_k = min(int(kwds.get('top_k', 50)), 50)
+        seed = kwds.get('seed', None)
+        if seed is not None:
+            seed = int(seed)
+        else:
+            seed = random.randint(0, 2**32 - 1)
+
+        # Get a model.  If there are multiple models available, e.g. if we
+        # have multiple GPUs, this will balance the load a bit.
+        model = get_next_model()
+
+        response.other_headers.extend([
+            f'X-Max-Length: {max_length}',
+            f'X-Top-K: {top_k}',
+            f'X-Seed: {seed}',
+            f'X-Model-Device: {model.device}',
+        ])
+
         # We want to enable TCP_NODELAY for the duration of the response.
         # This ensures packets are sent immediately without any internal
         # buffering.
-        response.enable_tcp_nodelay()
+        try:
+            response.enable_tcp_nodelay()
+            enabled_nodelay = True
+        except Exception as e:
+            logging.error(f'Error enabling TCP_NODELAY: {e}')
+            enabled_nodelay = False
 
         # Write the chunked header immediately.
         response_bytes = bytes(response)
@@ -538,40 +882,60 @@ class Gpt2App(HttpApp):
         # Send the initial prompt text.
         response.send_chunk(text)
 
-        if kwds is None:
-            kwds = {}
-        max_length = min(kwds.get('max_length', 1024), 1024)
-        top_k = min(kwds.get('top_k', 50), 50)
-
-        generate_tokens = self.model.generate_async_for(
+        generate_tokens = model.generate_async_for(
             text,
             max_length=max_length,
             top_k=top_k,
+            seed=seed,
         )
         async for decoded_token in generate_tokens:
+            if decoded_token == -1:
+                # A non-printable token was generated, terminating generation.
+                response.send_chunk(OOPS_NON_PRINTABLE_ENCOUNTERED)
+                break
+
+            # The HTTP server's `connection_lost()` will clear the server's
+            # transport member if the connection is lost.  If this happens,
+            # we can stop generating tokens.
+            transport = server.transport
+            if not transport:
+                break
+
+            # Otherwise, send the decoded token to the client via chunked
+            # encoding.
             response.send_chunk(decoded_token)
 
-        # Send the termination chunk.
+        # Send the termination chunk.  This may fail at the socket.send()
+        # level if the client has already disconnected, which is harmless.
         response.end_chunks()
 
-        # Disable TCP_NODELAY now that the response is complete.
-        response.disable_tcp_nodelay()
+        # Disable TCP_NODELAY now that the response is complete.  Again, this
+        # may fail at the socket level if the client has already disconnected,
+        # which is harmless.
+        if enabled_nodelay:
+            try:
+                response.disable_tcp_nodelay()
+            except Exception as e:
+                logging.error(f'Error disabling TCP_NODELAY: {e}')
 
     @route
-    def generate(self, request: Request, *args : List, **kwds: Dict) -> None:
+    def generate(self, request: Request, *args: List, **kwds: Dict) -> None:
         text = args[0]
+        # Obtain the event loop and schedule the response generation via our
+        # async generation coroutine.  We have to do it like this as at this
+        # point we're still within the call frame of the data_received()
+        # protocol callback, which isn't an async function.
         loop = asyncio.get_running_loop()
         loop.create_task(self.generate_response(request, text, **kwds))
 
 
-
 if __name__ == '__main__':
-    import sys
     logging.basicConfig(
         level=getattr(logging, 'DEBUG'),
         format='%(asctime)s - %(levelname)s - %(message)s',
     )
 
-    model = MODEL
+    load_models()
+    model = get_next_model()
     result = model.generate("The quick brown fox")
     print(f'Returned: {result}')

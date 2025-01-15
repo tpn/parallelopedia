@@ -2,13 +2,14 @@
 # Imports
 # =============================================================================
 import glob
+import importlib.util
 import logging
 import os
 import string
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 from os.path import abspath, join, normpath
 from typing import List, Tuple
 
@@ -28,6 +29,7 @@ ALLOWED = string.printable + string.punctuation
 ORD_ALLOWED = set(map(ord, ALLOWED))
 
 PARTITIONS = 127
+
 
 # =============================================================================
 # Context Managers
@@ -71,11 +73,14 @@ class ElapsedTimer:
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
 def join_path(*args):
     return abspath(normpath(join(*args)))
 
 
-def get_class_from_string(class_name: str) -> type:
+def get_class_from_string(class_name: str,
+                          enforce_flake8: bool = True) -> type:
     """
     Obtains an instance of a class object from a string representation of the
     class name, which may include the module name, e.g. `spam.eggs.Bacon`.
@@ -84,24 +89,62 @@ def get_class_from_string(class_name: str) -> type:
 
         class_name (str): Supplies the name of the class.
 
-    Returns:
+        enforce_flake8 (bool): Optionally supplies a boolean that, if True,
+            runs flake8 on the imported module and raises an exception if any
+            issues are detected.
 
+    Returns:
         type: Returns the class object.
 
+    Raises:
+        Exception: If flake8 detects any issues in the imported module.
     """
     timer = ElapsedTimer()
     with timer:
         parts = class_name.split('.')
         module_name = '.'.join(parts[:-1])
         class_name = parts[-1]
-        if module_name:
+        module = None
+
+        if not module_name:
+            # Attempt to resolve the class name directly from globals.
+            module = globals()[class_name]
+
+        elif enforce_flake8:
+            # Find the module's spec to get the file path without importing
+            # it first.  This allows us to run flake8 and fail-fast if any
+            # issues are detected.
+            spec = importlib.util.find_spec(module_name)
+            if not spec or not spec.origin:
+                raise ModuleNotFoundError(
+                    f"Module '{module_name}' could not be located."
+                )
+
+            module_file = spec.origin
+
+            result = subprocess.run(
+                ["flake8", module_file],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise Exception(
+                    f"Flake8 issues found in {module_file}:\n"
+                    f"{result.stdout}{result.stderr}"
+                )
+
+        if not module:
             module = __import__(module_name)
+            # Traverse the module hierarchy to get the class object.
             for comp in parts[1:]:
                 module = getattr(module, comp)
-        else:
-            module = globals()[class_name]
+
     logging.info(f'Loaded {class_name} in {timer.elapsed:.4f} seconds.')
+    if hasattr(module, 'init_once'):
+        logging.info(f'Calling {class_name}.init_once()...')
+        module.init_once()
     return module
+
 
 def get_classes_from_strings_parallel(class_names: List[str]) -> List[type]:
     """
@@ -136,6 +179,7 @@ def get_classes_from_strings_parallel(class_names: List[str]) -> List[type]:
     if errors:
         raise Exception(f'Errors occurred while loading classes: {errors}')
     return results
+
 
 def extract_trie(trie: datrie.Trie, chars: Tuple[str]) -> datrie.Trie:
     """
@@ -457,44 +501,4 @@ def load_freq_tries_parallel(
     return tries
 
 
-# =============================================================================
-# Classes
-# =============================================================================
-class ElapsedTimer:
-    """
-    Context manager and reusable timer to measure elapsed time.
-
-    Example:
-        timer = elapsed_timer()
-        with timer:
-            do_something()
-        print(f'Elapsed: {timer.elapsed:.3f}')
-
-        # Re-enterable:
-        with timer:
-            do_something_else()
-        print(f'Elapsed: {timer.elapsed:.3f}')
-    """
-
-    def __init__(self):
-        self.start = None
-        self._elapsed = None
-
-    def __enter__(self):
-        self.start = time.perf_counter()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self._elapsed = time.perf_counter() - self.start
-
-    @property
-    def elapsed(self):
-        """
-        Return the elapsed time for the most recent context.
-        """
-        if self._elapsed is None:
-            raise ValueError("Timer has not been used in a context yet.")
-        return self._elapsed
-
-
-# vim:set ts=8 sw=4 sts=4 tw=78 et:                                            #
+# vim:set ts=8 sw=4 sts=4 tw=78 et:                                           #

@@ -14,24 +14,20 @@ import mmap
 # Imports
 # =============================================================================
 import os
-import socket
-import string
 import threading
 import time
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from os.path import abspath, dirname, exists, join, normpath
+from os.path import dirname
 from typing import List, Tuple
 
 import datrie
-#import mwcomposerfromhell as mwc
-#import mwparserfromhell as mwp
+import mwcomposerfromhell as mwc
+import mwparserfromhell as mwp
 import numpy as np
 from numpy import uint64
 
 from parallelopedia.http.server import (
     HttpApp,
-    HttpServer,
     RangedRequest,
     Request,
     date_time_string,
@@ -39,9 +35,7 @@ from parallelopedia.http.server import (
     router,
 )
 
-from .util import (
-    join_path,
-)
+from .util import join_path
 
 # =============================================================================
 # Configurables -- Change These!
@@ -343,7 +337,7 @@ class WikiApp(HttpApp):
         response.message = 'OK'
         response.content_type = 'text/html; charset=UTF-8'
 
-        file_content = WIKI_XML_MMAP[rr.first_byte : rr.last_byte + 1]
+        file_content = WIKI_XML_MMAP[rr.first_byte:rr.last_byte + 1]
 
         code = mwp.parse(file_content)
         html = mwc.compose(code)

@@ -31,6 +31,8 @@ from parallelopedia.http import (
     RESPONSES,
 )
 
+from parallelopedia.util import get_class_from_string
+
 # ===============================================================================
 # Aliases
 # ===============================================================================
@@ -258,11 +260,11 @@ def router(routes=None):
 
             # This will be the full path received, minus query string and
             # fragment, e.g. '/offsets/Python'.
-            path = request.path[len(self.path) :]
+            path = request.path[len(self.path):]
 
-            # In the case of '/offsets/Python', that'll leave us with '/Python',
-            # and we want to lop off the slash.  In the case of, say, '/stats',
-            # path will be empty.
+            # In the case of '/offsets/Python', that'll leave us with
+            # '/Python', and we want to lop off the slash.  In the case of,
+            # say, '/stats', path will be empty.
             if path and path[0] == '/':
                 if len(path) > 1:
                     path = path[1:]
@@ -311,11 +313,8 @@ def router(routes=None):
 
 
 def json_serialization(request=None, obj=None):
-    transport = None
     if not request:
         request = Request(transport=None, data=None)
-    else:
-        transport = request.transport
     if not obj:
         obj = {'message': 'Hello, World!'}
     response = request.response
@@ -383,7 +382,7 @@ class Headers(dict):
             ix = line.find(b':')
             if ix == -1:
                 raise InvalidHeaderText()
-            (key, value) = (line[:ix], line[ix + 1 :])
+            (key, value) = (line[:ix], line[ix + 1:])
             key = key.lower().decode()
             value = value.lstrip().decode()
             self[key] = value
@@ -395,6 +394,9 @@ class Headers(dict):
         except KeyError:
             return None
 
+    def __setattr__(self, name, value):
+        self[name] = value
+
 
 class Response:
     __slots__ = (
@@ -404,7 +406,6 @@ class Response:
         'date',
         'server',
         'version',
-        'headers',
         'request',
         'command',
         'explain',
@@ -428,7 +429,6 @@ class Response:
         self.date = None
         self.server = DEFAULT_SERVER_RESPONSE
         self.version = None
-        self.headers = None
         self.request = request
         self.command = None
         self.explain = ''
@@ -454,6 +454,9 @@ class Response:
         server = self.server
         message = self.message
         content_type = self.content_type
+
+        user_other_headers = self.other_headers
+        self.other_headers = []
 
         connection = ''
         if not self.request.keep_alive:
@@ -497,6 +500,9 @@ class Response:
             content_length = 'Content-Length: 0'
             self.other_headers.append(content_length)
             rn2 = ''
+
+        if user_other_headers:
+            self.other_headers.extend(user_other_headers)
 
         if self.other_headers:
             other_headers = '\r\n'.join(self.other_headers)
@@ -652,7 +658,7 @@ class RangedRequest:
                 pair = r.split('-')
                 self.first_byte = int(pair[0])
                 self.last_byte = int(pair[1])
-        except Exception as e:
+        except Exception:
             raise InvalidRangeRequest
 
         if self.first_byte is not None and self.last_byte is not None:
@@ -765,12 +771,17 @@ class HttpServer(asyncio.Protocol):
             else:
                 return bytes(response)
 
+    def connection_lost(self, exc):
+        if exc:
+            logging.warning(f'Connection lost: {exc}')
+        self.transport = None
+
     def process_new_request(self, request):
         raw = request.data
         ix = raw.find(b'\r\n')
         if ix == -1:
             return self.error(request, 400, "Line too long")
-        (requestline, rest) = (raw[:ix], raw[ix + 2 :])
+        (requestline, rest) = (raw[:ix], raw[ix + 2:])
         words = requestline.split()
         num_words = len(words)
         if num_words == 3:
@@ -826,7 +837,7 @@ class HttpServer(asyncio.Protocol):
         raw_headers = rest[:ix]
         try:
             headers = Headers(raw_headers)
-        except Exception as e:
+        except Exception:
             return self.error(request, 400, "Malformed headers")
 
         h = request.headers = headers
@@ -962,7 +973,6 @@ class HttpServer(asyncio.Protocol):
         return self.do_GET(request)
 
     def do_GET(self, request):
-        response = request.response
         path = translate_path(request.path)
         logging.debug("Translated path: %s", path)
         if os.path.isdir(path):
@@ -1092,7 +1102,7 @@ class HttpServer(asyncio.Protocol):
         # achieve this via TCP_CORK and sendfile(), but it's not as clean.
         # As we're using memory-mapped files, we can just send the headers
         # and the file content in one go.
-        file_content = memory_map[r.first_byte : r.last_byte + 1]
+        file_content = memory_map[r.first_byte:r.last_byte + 1]
         response.body = file_content
         self.send_response(request)
 
@@ -1163,6 +1173,10 @@ class HttpServer(asyncio.Protocol):
 
         response.last_modified = last_modified
 
+        if request.command == 'HEAD':
+            # HEAD requests don't get a body.
+            return self.send_response(request)
+
         # Now open the file and either read the entire contents, or the
         # specific range requested.
         try:
@@ -1210,6 +1224,9 @@ class HttpServer(asyncio.Protocol):
 
     def send_response(self, request):
         response = request.response
+        if request.command == 'HEAD':
+            # HEAD requests don't get a body.
+            response.body = None
         if response:
             response_bytes = bytes(response)
             logging.debug(f"Sending {len(response_bytes)} byte(s) response.")
@@ -1283,16 +1300,6 @@ def parse_arguments():
         help='The listen backlog for the server.',
     )
     return parser.parse_args()
-
-
-def get_class_from_string(class_name):
-    parts = class_name.split('.')
-    module_name = '.'.join(parts[:-1])
-    class_name = parts[-1]
-    module = __import__(module_name)
-    for comp in parts[1:]:
-        module = getattr(module, comp)
-    return module
 
 
 async def main_async(args: argparse.Namespace, protocol):
