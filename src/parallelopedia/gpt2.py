@@ -869,13 +869,17 @@ class Gpt2App(HttpApp):
 
         if kwds is None:
             kwds = {}
-        max_length = min(int(kwds.get('max_length', 100)), 1024)
-        top_k = min(int(kwds.get('top_k', 50)), 50)
+        max_length = min(int(kwds.get('max_length', 100) or 100), 1024)
+        top_k = min(int(kwds.get('top_k', 50) or 50), 50)
         seed = kwds.get('seed', None)
-        if seed is not None:
-            seed = int(seed)
-        else:
+        if seed:
+            try:
+                seed = int(seed)
+            except ValueError:
+                seed = None
+        if not seed:
             seed = random.randint(0, 2**32 - 1)
+
         device = kwds.get('device', None)
 
         model = None
@@ -899,7 +903,15 @@ class Gpt2App(HttpApp):
             # have multiple GPUs, this will balance the load a bit.
             model = get_next_model()
 
+        expose_headers = (
+            'Access-Control-Expose-Headers: '
+            'X-Max-Length, '
+            'X-Top-K, '
+            'X-Seed, '
+            'X-Model-Device'
+        )
         response.other_headers.extend([
+            expose_headers,
             f'X-Max-Length: {max_length}',
             f'X-Top-K: {top_k}',
             f'X-Seed: {seed}',
