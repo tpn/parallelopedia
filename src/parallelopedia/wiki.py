@@ -274,13 +274,14 @@ class WikiApp(HttpApp):
 
     @route
     def wiki(self, request, name, **kwds):
+        server = self.server
         # Do an exact lookup if we find a match.
         if len(name) < 1:
-            return self.error(request, 400, "Name too short (< 1 char)")
+            return server.error(request, 400, "Name too short (< 1 char)")
 
         titles = TITLE_TRIES[ord(name[0])]
         if not titles or name not in titles:
-            return self.error(request, 404)
+            return server.error(request, 404)
 
         o = titles[name][0]
         o = uint64(o if o > 0 else o * -1)
@@ -291,7 +292,7 @@ class WikiApp(HttpApp):
         range_request = '%d-%d' % (start, end)
         request.range = RangedRequest(range_request)
         request.response.content_type = 'text/xml; charset=utf-8'
-        return self.ranged_sendfile_mmap(
+        return server.ranged_sendfile_mmap(
             request,
             WIKI_XML_MMAP,
             WIKI_XML_SIZE,
@@ -300,23 +301,25 @@ class WikiApp(HttpApp):
 
     @route
     def offsets(self, request, name, limit=None):
+        server = self.server
         if not name:
-            return self.error(request, 400, "Missing name")
+            return server.error(request, 400, "Missing name")
 
         if len(name) < 3:
-            return self.error(request, 400, "Name too short (< 3 chars)")
+            return server.error(request, 400, "Name too short (< 3 chars)")
 
-        return self.send_response(
+        return server.send_response(
             json_serialization(request, get_page_offsets_for_key(name))
         )
 
     @route
     def xml(self, request, *args, **kwds):
+        server = self.server
         if not request.range:
-            return self.error(request, 400, "Ranged-request required.")
+            return server.error(request, 400, "Ranged-request required.")
         else:
             request.response.content_type = 'text/xml; charset=utf-8'
-            return self.ranged_sendfile_mmap(
+            return server.ranged_sendfile_mmap(
                 request,
                 WIKI_XML_MMAP,
                 WIKI_XML_SIZE,
@@ -325,9 +328,10 @@ class WikiApp(HttpApp):
 
     @route
     def html(self, request, *args, **kwds):
+        server = self.server
         rr = request.range
         if not rr:
-            return self.error(request, 400, "Ranged-request required.")
+            return server.error(request, 400, "Ranged-request required.")
 
         if not rr.set_file_size_safe(WIKI_XML_SIZE, self):
             return
@@ -344,7 +348,7 @@ class WikiApp(HttpApp):
         response.content_length = len(html)
         response.body = html
 
-        return self.send_response(request)
+        return server.send_response(request)
 
     @route
     def hello(self, request, *args, **kwds):
@@ -353,25 +357,26 @@ class WikiApp(HttpApp):
 
     @route
     def title(self, request, name, *args, **kwds):
+        server = self.server
         if len(name) < 1:
-            return self.error(request, 400, "Name too short (< 1 char)")
+            return server.error(request, 400, "Name too short (< 1 char)")
 
         titles = TITLE_TRIES[ord(name[0])]
         if not titles or name not in titles:
-            return self.error(request, 404)
+            return server.error(request, 404)
 
         items = titles.items(name)
-        return self.send_response(json_serialization(request, items))
+        return server.send_response(json_serialization(request, items))
 
     @route
     def json(self, request, *args, **kwds):
-        return self.send_response(
+        return self.server.send_response(
             json_serialization(request, {'message': 'Hello, World!'})
         )
 
     @route
     def plaintext(self, request, *args, **kwds):
-        return self.send_response(
+        return self.server.send_response(
             text_serialization(request, text='Hello, World!')
         )
 
