@@ -3,6 +3,7 @@
 # =============================================================================
 import glob
 import importlib.util
+import json
 import logging
 import os
 import string
@@ -10,6 +11,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from os.path import abspath, join, normpath
 from typing import List, Tuple
 
@@ -182,6 +184,81 @@ def get_classes_from_strings_parallel(class_names: List[str]) -> List[type]:
     if errors:
         raise Exception(f'Errors occurred while loading classes: {errors}')
     return results
+
+@dataclass
+class HuggingFaceModel:
+    name: str
+    config: dict
+    safetensors: "safetensors.safe_open"
+    tokenizer: dict
+    tokenizer_config: dict
+    vocab: dict
+
+def get_huggingface_model(model_name: str) -> HuggingFaceModel:
+    """
+    Returns a Hugging Face model object for the given model name.
+
+    Args:
+
+        model_name (str): Supplies the name of the Hugging Face model.  This
+            should be in the format of `namespace/model`, e.g. for GPT2 XL:
+            `openai-community/gpt2-xl`.  This will be expanded out to the
+            following directory:
+                `~/.cache/huggingface/hub/models--openai-community--gpt2-xl`
+
+    Returns:
+
+        HuggingFaceModel: Returns a HuggingFaceModel object containing the
+            model name, configuration, and SafeTensors object.
+    """
+    base = os.path.expanduser('~/.cache/huggingface/hub/models--')
+    (namespace, model) = model_name.split('/')
+    base_path = f'{base}{namespace}--{model}'
+    ref_path = f'{base_path}/refs/main'
+    with open(ref_path, 'r') as f:
+        ref = f.read().strip()
+    snapshots_dir = f'{base_path}/snapshots/{ref}'
+    safetensors_path = f'{snapshots_dir}/model.safetensors'
+    import safetensors
+    timer = ElapsedTimer()
+    print(f'About to load safetensors from {safetensors_path}...')
+    with timer:
+        st = safetensors.safe_open(
+            safetensors_path,
+            framework="pt",
+            device="cpu",
+        )
+    msg = (
+        f'Loaded safetensors from {safetensors_path} '
+        f'in {timer.elapsed:.4f} seconds.'
+    )
+    print(msg)
+    logging.info(msg)
+
+    config_path = f'{snapshots_dir}/config.json'
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    tokenizer_path = f'{snapshots_dir}/tokenizer.json'
+    with open(tokenizer_path, 'r') as f:
+        tokenizer = json.load(f)
+
+    tokenizer_config_path = f'{snapshots_dir}/tokenizer_config.json'
+    with open(tokenizer_config_path, 'r') as f:
+        tokenizer_config = json.load(f)
+
+    vocab_path = f'{snapshots_dir}/vocab.json'
+    with open(vocab_path, 'r') as f:
+        vocab = json.load(f)
+
+    return HuggingFaceModel(
+        model_name,
+        config,
+        st,
+        tokenizer,
+        tokenizer_config,
+        vocab,
+    )
 
 
 def extract_trie(trie: datrie.Trie, chars: Tuple[str]) -> datrie.Trie:
