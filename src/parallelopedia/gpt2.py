@@ -36,7 +36,7 @@ from parallelopedia.http.server import (
     make_routes,
     router,
 )
-from parallelopedia.util import ElapsedTimer, join_path
+from parallelopedia.util import ElapsedTimer, get_huggingface_model, join_path
 
 # =============================================================================
 # Configuration
@@ -61,6 +61,7 @@ else:
     TORCH_PROFILE_ACTIVITIES = None
 
 MODELS_LOCK = threading.Lock()
+PRETRAINED_MODELS_LOCK = threading.Lock()
 
 # If PARALLELOPEDIA_CPU_ONLY is set, don't try and use CUDA.
 if 'PARALLELOPEDIA_CPU_ONLY' in os.environ or not torch.cuda.is_available():
@@ -131,6 +132,51 @@ else:
             f'{timer.elapsed:.3f} seconds.'
         )
         logging.info(msg)
+
+    PRETRAINED_MODELS = [None] * TOTAL_MODELS
+    PRETRAINED_MODELS_ROUND_ROBIN = itertools.cycle(range(TOTAL_MODELS))
+
+    def get_next_pretrained_model_random():
+        # Randomly select a GPU to use.
+        return PRETRAINED_MODELS[random.randint(0, TOTAL_MODELS - 1)]
+
+    def get_next_pretrained_model_round_robin():
+        with PRETRAINED_MODELS_LOCK:
+            index = next(PRETRAINED_MODELS_ROUND_ROBIN)
+        return PRETRAINED_MODELS[index]
+
+    get_next_pretrained_model = get_next_pretrained_model_round_robin
+
+    def load_pretrained_models():
+        max_workers = min(TOTAL_MODELS, os.cpu_count())
+        timer = ElapsedTimer()
+        with timer:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        GPT.from_pretrained,
+                        model_name='openai-community/gpt2-xl',
+                        map_location=f'cuda:{i}',
+                        torch_profile_activities=TORCH_PROFILE_ACTIVITIES,
+                    ): i for i in range(NUM_GPUS)
+                }
+                # Add the CPU model.
+                futures[executor.submit(
+                    GPT.from_pretrained,
+                    model_name='openai-community/gpt2-xl',
+                    map_location='cpu',
+                    torch_profile_activities=TORCH_PROFILE_ACTIVITIES,
+                )] = NUM_GPUS
+                for future in as_completed(futures):
+                    i = futures[future]
+                    model = future.result()
+                    PRETRAINED_MODELS[i] = model
+        msg = (
+            f'Loaded gpt2-xl model on {NUM_GPUS} GPU(s) and 1 CPU in '
+            f'{timer.elapsed:.3f} seconds.'
+        )
+        logging.info(msg)
+
 
 # =============================================================================
 # Globals
@@ -420,19 +466,20 @@ class GPT(nn.Module):
         msg = f'Initialized GPT model in {timer.elapsed:.3f} seconds.'
         logging.info(msg)
 
-        with timer:
-            if not self.torch_profile_activities:
-                self.load_state_dict(checkpoint.model)
-            else:
-                with torch.profiler.profile(
-                    activities=self.torch_profile_activities,
-                    with_stack=True,
-                ) as prof:
+        if checkpoint.model:
+            with timer:
+                if not self.torch_profile_activities:
                     self.load_state_dict(checkpoint.model)
-                self.torch_profile_load_state = prof
+                else:
+                    with torch.profiler.profile(
+                        activities=self.torch_profile_activities,
+                        with_stack=True,
+                    ) as prof:
+                        self.load_state_dict(checkpoint.model)
+                    self.torch_profile_load_state = prof
 
-        msg = f'Loaded model weights in {timer.elapsed:.3f} seconds.'
-        logging.info(msg)
+            msg = f'Loaded model weights in {timer.elapsed:.3f} seconds.'
+            logging.info(msg)
 
         # Obtain the tokenizer for GPT2, and resolve the stop token.
         enc = tiktoken.get_encoding("gpt2")
@@ -574,6 +621,128 @@ class GPT(nn.Module):
             f"Loaded model from step {checkpoint.step}, "
             f"val_loss {checkpoint.val_loss}"
         )
+        return model
+
+    @classmethod
+    def from_pretrained(cls,
+                        model_name: str,
+                        map_location: Optional[str] = None,
+                        manual_seed: Optional[int] = None,
+                        torch_profile_activities: Optional[List[type]] = None,
+                        ) -> "GPT":
+        """
+        Load a GPT model from a pretrained model.
+
+        Arguments:
+
+            model_name (str): Supplies the model name to use.  See the
+                docstring for `.util.get_huggingface_safetensors()` for
+                more information about the format.
+
+            map_location (str): Optionally supplies the device to map the
+                loaded tensor parameters to.  If None, "cuda" will be used
+                if available, otherwise "cpu".
+
+            manual_seed (int): Optionally supplies the manual seed to use for
+                the model.  If None, a random seed will be used.
+
+            torch_profile_activities (list): Optionally supplies a list of
+                torch.profiler.ProfilerActivity to profile.
+
+        """
+        if manual_seed is None:
+            # Use a random seed.
+            manual_seed = random.randint(0, 2**32 - 1)
+
+        if map_location is None:
+            if torch.cuda.is_available():
+                map_location = "cuda"
+            else:
+                map_location = "cpu"
+
+        timer = ElapsedTimer()
+        with timer:
+            hf_model = get_huggingface_model(model_name)
+        msg = (
+            f'Loaded HuggingFace model {model_name} in '
+            f'{timer.elapsed:.3f} seconds.'
+        )
+        logging.info(msg)
+
+        config = GPTConfig(**{
+            'block_size': hf_model.config['n_ctx'],
+            'vocab_size': hf_model.config['vocab_size'],
+            'n_layer': hf_model.config['n_layer'],
+            'n_head': hf_model.config['n_head'],
+            'n_embd': hf_model.config['n_embd'],
+        })
+        checkpoint = GPTCheckpoint(**{
+            'model': None,
+            'step': 0,
+            'val_loss': 0.0,
+            'config': config,
+        })
+
+        with timer:
+            model = cls(
+                checkpoint=checkpoint,
+                device=map_location,
+                manual_seed=manual_seed,
+                torch_profile_activities=torch_profile_activities,
+            )
+        logging.info(f'Created GPT model in {timer.elapsed:.3f} seconds.')
+
+        # This logic is based heavily off build-nanogpt's `train_gpt2.py`;
+        # specifically: GPT.from_pretrained().
+
+        exclude = ('.attn.bias', '.attn.masked_bias', 'lm_head.weight')
+        transpose = (
+            'attn.c_attn.weight',
+            'attn.c_proj.weight',
+            'mlp.c_fc.weight',
+            'mlp.c_proj.weight',
+        )
+
+        # Identify the HuggingFace keys we're interested in.
+        st = hf_model.safetensors
+
+        # Identify our model keys we're interested in.
+        sd = model.state_dict()
+        sd_keys = [k for k in sd.keys() if not k.endswith(exclude)]
+        hf_keys = [k.replace('transformer.', '') for k in sd_keys]
+
+        def copy_tensor(hf_key, sd_key):
+            hf_tensor = st.get_tensor(hf_key)
+            if hf_key.endswith(transpose):
+                assert hf_tensor.shape[::-1] == sd[sd_key].shape
+                with torch.no_grad():
+                    sd[sd_key].copy_(hf_tensor.t())
+            else:
+                assert hf_tensor.shape == sd[sd_key].shape
+                with torch.no_grad():
+                    sd[sd_key].copy_(hf_tensor)
+
+        keys = zip(hf_keys, sd_keys)
+        max_workers = min(os.cpu_count(), len(sd_keys))
+        with timer:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(copy_tensor, hf_key, sd_key):
+                        (hf_key, sd_key) for (hf_key, sd_key) in keys
+                }
+                for future in as_completed(futures):
+                    future.result()
+        logging.info(
+            f'Copied weights with {max_workers} thread(s) '
+            f'in {timer.elapsed:.3f} seconds.'
+        )
+
+        device = map_location
+        with timer:
+            model.to(device)
+        msg = f'Moved model to {device} in {timer.elapsed:.3f} seconds.'
+        logging.info(msg)
+
         return model
 
     def _init_weights(self, module):
@@ -819,6 +988,7 @@ class Gpt2App(HttpApp):
     @classmethod
     def init_once(cls):
         load_models()
+        load_pretrained_models()
 
         # This doesn't work because torch.jit doesn't handle our
         # async generator.
@@ -882,10 +1052,19 @@ class Gpt2App(HttpApp):
 
         device = kwds.get('device', None)
 
+        model_name = kwds.get('model', None)
+        if model_name == 'gpt2-xl':
+            models = PRETRAINED_MODELS
+            get_next = get_next_pretrained_model
+        else:
+            model_name = 'gpt2'
+            models = MODELS
+            get_next = get_next_model
+
         model = None
         if device is not None:
             if device == 'cpu':
-                model = MODELS[-1]
+                model = models[-1]
             elif device.startswith('cuda:'):
                 try:
                     index = int(device[5:])
@@ -894,20 +1073,21 @@ class Gpt2App(HttpApp):
                 if index < 0 or index >= NUM_GPUS:
                     index = -1
                 if index != -1:
-                    model = MODELS[index]
+                    model = models[index]
             elif device == 'cuda':
-                model = MODELS[random.randint(0, NUM_GPUS - 1)]
+                model = models[random.randint(0, NUM_GPUS - 1)]
 
         if not model:
             # Get a model.  If there are multiple models available, e.g. if we
             # have multiple GPUs, this will balance the load a bit.
-            model = get_next_model()
+            model = get_next()
 
         expose_headers = (
             'Access-Control-Expose-Headers: '
             'X-Max-Length, '
             'X-Top-K, '
             'X-Seed, '
+            'X-Model-Name, '
             'X-Model-Device'
         )
         response.other_headers.extend([
@@ -915,6 +1095,7 @@ class Gpt2App(HttpApp):
             f'X-Max-Length: {max_length}',
             f'X-Top-K: {top_k}',
             f'X-Seed: {seed}',
+            f'X-Model-Name: {model_name}',
             f'X-Model-Device: {model.device}',
         ])
 
@@ -990,7 +1171,16 @@ if __name__ == '__main__':
         format='%(asctime)s - %(levelname)s - %(message)s',
     )
 
-    load_models()
-    model = get_next_model()
-    result = model.generate("The quick brown fox")
-    print(f'Returned: {result}')
+    if False:
+        load_models()
+        model = get_next_model()
+        result = model.generate("The quick brown fox")
+        print(f'Returned: {result}')
+
+    if True:
+        model = GPT.from_pretrained(
+            model_name='openai-community/gpt2-xl',
+            map_location='cuda',
+        )
+        result = model.generate("The quick brown fox")
+        print(f'Returned: {result}')
