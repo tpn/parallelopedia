@@ -69,6 +69,13 @@ class Gpt1(HttpApp):
 # Main
 # =============================================================================
 def parse_arguments():
+    """
+    Parse the command-line arguments for the server.
+
+    Returns:
+        argparse.Namespace: The parsed command-line arguments.
+
+    """
     parser = argparse.ArgumentParser(description='Run the HTTP server.')
     parser.add_argument(
         '--ip',
