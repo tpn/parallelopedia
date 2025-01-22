@@ -71,6 +71,7 @@ if 'PARALLELOPEDIA_CPU_ONLY' in os.environ or not torch.cuda.is_available():
     MODELS = [None]
 
     def load_models():
+        global MODELS
         MODELS[0] = GPT.from_local_pretrained(
             model_path=MODEL_CHECKPOINT,
             map_location='cpu',
@@ -104,6 +105,7 @@ else:
     get_next_model = get_next_model_round_robin
 
     def load_models():
+        global MODELS
         max_workers = min(TOTAL_MODELS, os.cpu_count())
         timer = ElapsedTimer()
         with timer:
@@ -148,6 +150,7 @@ else:
     get_next_pretrained_model = get_next_pretrained_model_round_robin
 
     def load_pretrained_models():
+        global PRETRAINED_MODELS
         max_workers = min(TOTAL_MODELS, os.cpu_count())
         timer = ElapsedTimer()
         with timer:
@@ -711,6 +714,8 @@ class GPT(nn.Module):
         sd_keys = [k for k in sd.keys() if not k.endswith(exclude)]
         hf_keys = [k.replace('transformer.', '') for k in sd_keys]
 
+        # Copying tensors in parallel yields decent speedups, at least on my
+        # V100s which have five concurrent copy engines.
         def copy_tensor(hf_key, sd_key):
             hf_tensor = st.get_tensor(hf_key)
             if hf_key.endswith(transpose):
@@ -797,18 +802,22 @@ class GPT(nn.Module):
         return (logits, loss)
 
     def generate(
-        self, text: str, max_length: int = 1024, top_k: int = 50
+        self, text: str, max_length: int = 1024, top_k: int = 50,
+        seed: int = None,
     ) -> str:
         """
-        Generate text from the model, conditioned on `text`.
+        Generate text from the model.
 
         Args:
 
-            text (str): The prompt to condition on.
+            text (str): Supplies the prompt to condition on.
 
             max_length (int): Maximum total length (prompt + generated).
 
             top_k (int): Number of tokens to consider at each generation step.
+
+            seed (int): Optionally supplies the manual seed to use for the
+                generator.  If None, the model's manual seed will be used.
 
         Returns:
 
@@ -821,11 +830,19 @@ class GPT(nn.Module):
         # Encode prompt -> tensor of shape (1, T)
         tokens = enc.encode(text)
 
-        x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+        x = torch.tensor(
+            tokens,
+            dtype=torch.long,
+            device=device
+        ).unsqueeze(0)
 
         # Create a random generator for reproducibility.
         sample_rng = torch.Generator(device=device)
-        sample_rng.manual_seed(self.manual_seed)
+        if seed is None:
+            seed = self.manual_seed
+        sample_rng.manual_seed(seed)
+
+        output = []
 
         # Generate tokens up to our max length, or until we hit the stop token.
         start = time.perf_counter()
@@ -854,12 +871,24 @@ class GPT(nn.Module):
             next_token = torch.gather(topk_indices, -1, next_idx)  # (1, 1)
 
             # If the next token is the stop token, we're done.
-            if next_token.item() == stop_token:
+            next_token_item = next_token.item()
+            if next_token_item == stop_token:
                 break
 
-            # Otherwise, concatenate this token to the sequence and continue
-            # generation.
+            # Append token to current sequence.  Although we only yield a
+            # singular decoded token below, we still need to keep track of
+            # the entire sequence for subsequent generation steps.
             x = torch.cat((x, next_token), dim=1)
+
+            # Decode the newly-generated token.
+            new_text_fragment = enc.decode([next_token.item()])
+
+            # If the next token isn't printable, terminate generation.  (With
+            # our locally-trained GPT2 124M model, this happens quite often.)
+            if not all(c in self.printable for c in new_text_fragment):
+                break
+
+            output.append(new_text_fragment)
 
         end = time.perf_counter()
         elapsed = end - start
@@ -869,12 +898,9 @@ class GPT(nn.Module):
             f'Generated {count} tokens in {elapsed:.2f} seconds '
             f'({tokens_per_sec:.2f} tokens/sec)'
         )
-        logging.debug(msg)
+        logging.info(msg)
 
-        # Decode the generated tokens and return the text, including the
-        # prompt.
-        output_tokens = x[0].tolist()
-        return enc.decode(output_tokens)
+        return text + ''.join(output)
 
     async def generate_async_for(
         self, text: str, max_length: int = 1024, top_k: int = 50,
@@ -990,6 +1016,8 @@ class Gpt2App(HttpApp):
         load_models()
         load_pretrained_models()
 
+        global MODELS, PRETRAINED_MODELS
+
         # This doesn't work because torch.jit doesn't handle our
         # async generator.
         if False:
@@ -1001,6 +1029,29 @@ class Gpt2App(HttpApp):
                     MODELS[i] = model
                 logging.info(
                     f'JIT compiled model {i} in {timer.elapsed:.3f} seconds.'
+                )
+
+        if True:
+            for (i, model) in enumerate(MODELS):
+                model.config = dataclasses.asdict(model.config)
+                timer = ElapsedTimer()
+                with timer:
+                    model = torch.compile(model)
+                    MODELS[i] = model
+                logging.info(
+                    f'torch.compiled model {i} in '
+                    f'{timer.elapsed:.3f} seconds.'
+                )
+
+            for (i, model) in enumerate(PRETRAINED_MODELS):
+                model.config = dataclasses.asdict(model.config)
+                timer = ElapsedTimer()
+                with timer:
+                    model = torch.compile(model)
+                    PRETRAINED_MODELS[i] = model
+                logging.info(
+                    f'torch.compiled pretrained model {i} in '
+                    f'{timer.elapsed:.3f} seconds.'
                 )
 
     def is_connected(self):
@@ -1165,22 +1216,157 @@ class Gpt2App(HttpApp):
         loop.create_task(self.generate_response(request, text, **kwds))
 
 
-if __name__ == '__main__':
+def parse_arguments():
+    """
+    Parse the command-line arguments for the parallelopedia.gpt2 module.
+
+    Returns:
+        argparse.Namespace: The parsed command-line arguments.
+
+    """
+    import argparse
+    parser = argparse.ArgumentParser(description='Run the GPT2 module.')
+    parser.add_argument(
+        '--log-level',
+        type=str,
+        default='INFO',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+        help='Set the logging level.',
+    )
+    parser.add_argument(
+        '--model',
+        type=str,
+        default='gpt2',
+        choices=['gpt2', 'gpt2-xl'],
+        help='Select the model to use.',
+    )
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='cuda',
+        help='Select the device to use.',
+    )
+    parser.add_argument(
+        '--max-length',
+        type=int,
+        default=100,
+        help='Set the maximum length of the generated text.',
+    )
+    parser.add_argument(
+        '--top-k',
+        type=int,
+        default=50,
+        help='Set the top-k value for sampling.',
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=None,
+        help='Set the random seed for generation.',
+    )
+    parser.add_argument(
+        '--prompt',
+        type=str,
+        default="Einstein's Theory of Relativity states that",
+        help='Set the prompt for generation.',
+    )
+    parser.add_argument(
+        '--torch-compile',
+        action='store_true',
+        help='Compile the models using torch.compile().',
+    )
+    parser.add_argument(
+        '--torch-jit',
+        action='store_true',
+        help='Compile the models using torch.jit.script().',
+    )
+    parser.add_argument(
+        '--torch-compile-fullgraph',
+        action='store_true',
+        help='Compile the models using torch.compile() with fullgraph=True.',
+    )
+    parser.add_argument(
+        '--torch-compile-reduce-overhead',
+        action='store_true',
+        help=(
+            'Compile the models using torch.compile() with '
+            'mode="reduce-overhead"',
+        )
+    )
+    parser.add_argument(
+        '--rounds',
+        type=int,
+        default=3,
+        help='Set the number of rounds for generation.',
+    )
+    args = parser.parse_args()
+    return args
+
+
+def main():
+    """
+    Main entry point for the parallelopedia.gpt2 module.
+    """
+    args = parse_arguments()
+
     logging.basicConfig(
-        level=getattr(logging, 'DEBUG'),
+        level=getattr(logging, args.log_level),
         format='%(asctime)s - %(levelname)s - %(message)s',
     )
 
-    if False:
-        load_models()
-        model = get_next_model()
-        result = model.generate("The quick brown fox")
-        print(f'Returned: {result}')
+    timer = ElapsedTimer()
+    with timer:
+        if args.model == 'gpt2-xl':
+            model = GPT.from_pretrained(
+                model_name='openai-community/gpt2-xl',
+                map_location=args.device,
+            )
+        else:
+            model = GPT.from_local_pretrained(
+                model_path=MODEL_CHECKPOINT,
+                map_location=args.device,
+                manual_seed=args.seed,
+            )
+    logging.info(
+        f'Loaded {args.model} on {args.device} '
+        f'in {timer.elapsed:.3f} seconds.'
+    )
 
-    if True:
-        model = GPT.from_pretrained(
-            model_name='openai-community/gpt2-xl',
-            map_location='cuda',
+    if args.torch_compile:
+        if args.torch_jit:
+            msg = 'Cannot specify both --torch-compile and --torch-jit.'
+            raise ValueError(msg)
+        model.config = dataclasses.asdict(model.config)
+        kwds = {}
+        if args.torch_compile_fullgraph:
+            kwds['fullgraph'] = True
+        if args.torch_compile_reduce_overhead:
+            kwds['mode'] = 'reduce-overhead'
+        with timer:
+            model = torch.compile(model, **kwds)
+        logging.info(f'torch.compiled model in {timer.elapsed:.3f} seconds.')
+    elif args.torch_jit:
+        model.config = dataclasses.asdict(model.config)
+        with timer:
+            model = torch.jit.script(model)
+        logging.info(f'JIT compiled model in {timer.elapsed:.3f} seconds.')
+
+
+    seed = args.seed
+    if seed is None or seed == '':
+        seed = random.randint(0, 2**32 - 1)
+
+    for i in range(args.rounds):
+        logging.info(f'Round {i + 1} of {args.rounds}.')
+        output = model.generate(
+            args.prompt,
+            max_length=args.max_length,
+            top_k=args.top_k,
+            seed=seed,
         )
-        result = model.generate("The quick brown fox")
-        print(f'Returned: {result}')
+        print(output)
+
+if __name__ == '__main__':
+    main()
+
+# vim:set ts=8 sw=4 sts=4 tw=78 et:                                          #
