@@ -5,14 +5,14 @@ into memory, and then query them as part of incoming request processing in
 parallel.
 """
 
+# =============================================================================
+# Imports
+# =============================================================================
+
 import glob
 import json
 import logging
 import mmap
-
-# =============================================================================
-# Imports
-# =============================================================================
 import os
 import threading
 import time
@@ -35,48 +35,49 @@ from parallelopedia.http.server import (
     router,
 )
 
-from .util import join_path
+from .util import join_path, ElapsedTimer
 
 # =============================================================================
-# Configurables -- Change These!
-# =============================================================================
-# Change this to the directory containing the downloaded files.
-# DATA_DIR = r'd:\data'
-DATA_DIR = join_path(dirname(__file__), '../../data')
-
-# =============================================================================
-# Constants
+# Configuration
 # =============================================================================
 
-# This file is huge when unzipped -- ~53GB.  Although, granted, it is the
-# entire Wikipedia in a single file.  The bz2 version is much smaller, but
-# still pretty huge.  Search the web for instructions on how to download
-# from one of the wiki mirrors, then bunzip2 it, then place in the same
-# data directory.
+# If the environment variable PARALLELOPEDIA_DATA_DIR is set, use that instead.
+if 'PARALLELOPEDIA_DATA_DIR' in os.environ:
+    DATA_DIR = os.environ['PARALLELOPEDIA_DATA_DIR']
+else:
+    DATA_DIR = join_path(dirname(__file__), '../../data')
+
+# N.B. This file is huge when unzipped: ~53GB.
 WIKI_XML_NAME = 'enwiki-20150205-pages-articles.xml'
-WIKI_XML_PATH = join_path(DATA_DIR, WIKI_XML_NAME)
+if 'PARALLELOPEDIA_WIKI_XML_DIR' in os.environ:
+    WIKI_XML_PATH = join_path(
+        os.environ['PARALLELOPEDIA_WIKI_XML_DIR'], WIKI_XML_NAME
+    )
+else:
+    WIKI_XML_PATH = join_path(DATA_DIR, WIKI_XML_NAME)
 
-# The following two files can be downloaded from
-# http://download.pyparallel.org.
-
-# This is a trie keyed by every <title>xxx</title> in the wiki XML; the value
-# is a 64-bit byte offset within the file where the title was found.
-# Specifically, it is the offset where the '<' bit of the <title> was found.
-TITLES_TRIE_PATH = join_path(DATA_DIR, 'titles.trie')
-# And because this file is so huge and the data structure takes so long to
-# load, we have another version that was created for titles starting with Z
-# and z (I picked 'z' as I figured it would have the least-ish titles).  (This
-# file was created via the save_titles_startingwith_z() method below.)
-ZTITLES_TRIE_PATH = join_path(DATA_DIR, 'ztitles.trie')
+# The directory where the title tries are stored.
+if 'PARALLELOPEDIA_WIKI_TITLE_TRIES_DIR' in os.environ:
+    TRIES_DIR = os.environ['PARALLELOPEDIA_WIKI_TITLE_TRIES_DIR']
+else:
+    TRIES_DIR = DATA_DIR
 
 # This is a sorted numpy array of uint64s representing the byte offset values
-# in the trie.  When given the byte offset of a title derived from a trie
+# in the tries.  When given the byte offset of a title derived from a trie
 # lookup, we can find the byte offset of where the next title starts within
 # the xml file.  That allows us to isolate the required byte range from the
 # xml file where the particular title is defined.  Such a byte range can be
 # satisfied with a ranged HTTP request.
+if 'PARALLELOPEDIA_WIKI_TITLES_OFFSETS_NPY_DIR' in os.environ:
+    TITLES_OFFSETS_NPY_DIR = (
+        os.environ['PARALLELOPEDIA_WIKI_TITLES_OFFSETS_NPY_DIR']
+    )
+else:
+    TITLES_OFFSETS_NPY_DIR = DATA_DIR
+
 TITLES_OFFSETS_NPY_PATH = join_path(DATA_DIR, 'titles_offsets.npy')
 
+# Number of partitions for the title tries.
 PARTITIONS = 127
 
 # =============================================================================
@@ -173,15 +174,15 @@ except AttributeError:
     # Ignore if madvise is not available.
     pass
 
-TITLE_OFFSETS = np.load(TITLES_OFFSETS_NPY_PATH)
-
-# Now load all of the tries in parallel.
-TITLE_TRIES = load_wiki_tries_parallel(DATA_DIR)
+# These are initialied in WikiApp.init_once().
+TITLE_OFFSETS = None
+TITLE_TRIES = None
 
 
 # =============================================================================
 # Misc Helpers
 # =============================================================================
+
 def json_serialization(request: Request = None, obj: dict = None) -> Request:
     """
     Helper method for converting a dict `obj` into a JSON response for the
@@ -243,34 +244,25 @@ def get_page_offsets_for_key(search_string: str) -> List[Tuple[str, int, int]]:
 
 
 # =============================================================================
-# Web Helpers
-# =============================================================================
-def exact_title(title):
-    if len(title) < 1:
-        return json.dumps([])
-
-    titles = TITLE_TRIES[ord(title[0])]
-    if title in titles:
-        return json.dumps(
-            [
-                [
-                    title,
-                ]
-                + [t for t in titles[title]]
-            ]
-        )
-    else:
-        return json.dumps([])
-
-
-# =============================================================================
 # Classes
 # =============================================================================
+
 class WikiApp(HttpApp):
     routes = make_routes()
     route = router(routes)
 
-    use_mmap = True
+    @classmethod
+    def init_once(cls):
+        global TITLE_OFFSETS, TITLE_TRIES
+
+        timer = ElapsedTimer()
+        with timer:
+            TITLE_OFFSETS = np.load(TITLES_OFFSETS_NPY_PATH)
+        logging.info(f'Loaded title offsets in {timer.elapsed:.4f} seconds.')
+
+        with timer:
+            TITLE_TRIES = load_wiki_tries_parallel(TRIES_DIR)
+        logging.info(f'Loaded title tries in {timer.elapsed:.4f} seconds.')
 
     @route
     def wiki(self, request, name, **kwds):
