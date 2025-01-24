@@ -902,6 +902,83 @@ class GPT(nn.Module):
 
         return text + ''.join(output)
 
+    @torch.compile
+    def generate_slim(
+        self, text_tokens: torch.Tensor, max_length: int = 1024,
+        top_k: int = 50, seed: int = None,
+    ) -> str:
+        """
+        Generate text from the model.  This version differs from `generate()`
+        in that it does not use any Python code that causes a torch graph
+        break.
+
+        Args:
+
+            text_tokens (torch.Tensor): The encoded prompt as a tensor of
+                shape (1, T).
+
+            max_length (int): Maximum total length (prompt + generated).
+
+            top_k (int): Number of tokens to consider at each generation step.
+
+            seed (int): Optionally supplies the manual seed to use for the
+                generator.  If None, the model's manual seed will be used.
+
+        Returns:
+
+            str: The generated text (including the initial prompt).
+        """
+        # Initialize alias.
+        device = self.device
+        stop_token = self.stop_token
+
+        # Create the tensor for capturing predicted tokens.
+        x = torch.tensor(
+            text_tokens,
+            dtype=torch.long,
+            device=device
+        ).unsqueeze(0)
+
+        # Create a random generator for reproducibility.
+        #sample_rng = torch.Generator(device=device)
+        #if seed is None:
+        #    seed = self.manual_seed
+        #sample_rng.manual_seed(seed)
+
+        # Generate tokens up to our max length, or until we hit the stop token.
+        for _ in range(max_length):
+            with torch.no_grad():
+                # Forward pass, ignoring the returned loss.
+                (logits, _) = self(x)
+
+            # Take the logits at the last time-step (shape: (1, vocab_size)).
+            logits = logits[:, -1, :]
+
+            # Convert to probabilities.
+            probs = F.softmax(logits, dim=-1)
+
+            # Top-k sampling.
+            topk_probs, topk_indices = torch.topk(probs, k=top_k, dim=-1)
+
+            # Sample the next token.
+            next_idx = torch.multinomial(
+                topk_probs,
+                num_samples=1,
+                #generator=sample_rng,
+            )
+            next_token = torch.gather(topk_indices, -1, next_idx)  # (1, 1)
+
+            # If the next token is the stop token, we're done.
+            next_token_item = next_token.item()
+            if next_token_item == stop_token:
+                break
+
+            # Append token to current sequence.
+            x = torch.cat((x, next_token), dim=1)
+
+        return x
+
+
     async def generate_async_for(
         self, text: str, max_length: int = 1024, top_k: int = 50,
         seed: int = None,
@@ -1302,6 +1379,11 @@ def parse_arguments():
         )
     )
     parser.add_argument(
+        '--generate-slim',
+        action='store_true',
+        help='Use the generate_slim() method for generation.',
+    )
+    parser.add_argument(
         '--rounds',
         type=int,
         default=3,
@@ -1372,14 +1454,34 @@ def main():
     if seed is None or seed == '':
         seed = random.randint(0, 2**32 - 1)
 
+    if args.generate_slim:
+        text_tokens = model.enc.encode(args.prompt)
+
     for i in range(args.rounds):
         logging.info(f'Round {i + 1} of {args.rounds}.')
-        output = model.generate(
-            args.prompt,
-            max_length=args.max_length,
-            top_k=args.top_k,
-            seed=seed,
-        )
+        if args.generate_slim:
+            with timer:
+                x = model.generate_slim(
+                    text_tokens,
+                    max_length=args.max_length,
+                    top_k=args.top_k,
+                    seed=seed,
+                )
+            elapsed = timer.elapsed
+            count = x.size(1)
+            tokens_per_sec = count / elapsed
+            logging.info(
+                f'Generated {count} tokens in {elapsed:.2f} seconds '
+                f'({tokens_per_sec:.2f} tokens/sec)'
+            )
+            output = model.enc.decode(x[0].tolist())
+        else:
+            output = model.generate(
+                args.prompt,
+                max_length=args.max_length,
+                top_k=args.top_k,
+                seed=seed,
+            )
         print(output)
 
 if __name__ == '__main__':
