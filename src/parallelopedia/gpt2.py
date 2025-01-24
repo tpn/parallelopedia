@@ -1294,6 +1294,14 @@ def parse_arguments():
         )
     )
     parser.add_argument(
+        '--torch-compile-max-autotune',
+        action='store_true',
+        help=(
+            'Compile the models using torch.compile() with '
+            'mode="max_autotune".',
+        )
+    )
+    parser.add_argument(
         '--rounds',
         type=int,
         default=3,
@@ -1341,7 +1349,15 @@ def main():
         if args.torch_compile_fullgraph:
             kwds['fullgraph'] = True
         if args.torch_compile_reduce_overhead:
+            if args.torch_compile_max_autotune:
+                msg = (
+                    'Cannot specify both --torch-compile-reduce-overhead and '
+                    '--torch-compile-max-autotune.'
+                )
+                raise ValueError(msg)
             kwds['mode'] = 'reduce-overhead'
+        elif args.torch_compile_max_autotune:
+            kwds['mode'] = 'max-autotune'
         with timer:
             model = torch.compile(model, **kwds)
         logging.info(f'torch.compiled model in {timer.elapsed:.3f} seconds.')
