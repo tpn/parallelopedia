@@ -19,8 +19,6 @@ import urllib
 from functools import partial
 from typing import List, Optional, Tuple, Type
 
-import datrie
-
 from parallelopedia.http import (
     DEFAULT_CONTENT_TYPE,
     DEFAULT_ERROR_CONTENT_TYPE,
@@ -30,7 +28,6 @@ from parallelopedia.http import (
     DIRECTORY_LISTING,
     RESPONSES,
 )
-
 from parallelopedia.util import (
     get_class_from_string,
     get_classes_from_strings_parallel,
@@ -185,12 +182,16 @@ class NotTrie(dict):
         return self.get(key)
 
 
-def make_routes(allowed: Optional[str] = None) -> datrie.Trie:
-    if not allowed:
-        allowed = allowed_url_characters
+try:
     import datrie
-
-    return datrie.Trie(allowed)
+except ImportError:
+    def make_routes(allowed=None):
+        return NotTrie()
+else:
+    def make_routes(allowed: Optional[str] = None) -> "datrie.Trie":
+        if not allowed:
+            allowed = allowed_url_characters
+        return datrie.Trie(allowed)
 
 
 def router(routes=None):
@@ -750,6 +751,13 @@ class PlaintextHttpApp(HttpApp):
     def plaintext(self, request):
         self.server.send_response(
             text_response(request, 'Hello, World!')
+        )
+
+    @route
+    def sleep(self, request, seconds):
+        time.sleep(int(seconds))
+        self.server.send_response(
+            text_response(request, f'Slept for {seconds} seconds.')
         )
 
 
@@ -1349,13 +1357,20 @@ async def main_async(
     """
     loop = asyncio.get_running_loop()
 
+    if os.name in ('nt', 'cygwin'):
+        reuse_port = False
+    else:
+        reuse_port = True
+
+    reuse_address = True
+
     server = await loop.create_server(
         lambda: protocol_class(*protocol_args),
         args.ip,
         args.port,
         backlog=args.listen_backlog,
-        reuse_address=True,
-        reuse_port=True,
+        reuse_address=reuse_address,
+        reuse_port=reuse_port,
     )
 
     async with server:
@@ -1403,13 +1418,13 @@ def main_threaded_multi_accept(
     import threading
 
     threads = []
-    for i in range(args.threads):
+    for _ in range(args.threads):
         thread = threading.Thread(
             target=start_event_loop,
             args=(args, protocol_class, *protocol_args),
         )
-        thread.start()
         threads.append(thread)
+        thread.start()
 
     for thread in threads:
         thread.join()
