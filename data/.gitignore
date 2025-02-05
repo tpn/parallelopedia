@@ -1,0 +1,9 @@
+*.keys
+*.trie
+*.xml
+*.zst
+*.txt
+*.csv
+*.tsv
+*.npy
+*.pt
