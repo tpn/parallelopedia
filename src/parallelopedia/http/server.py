@@ -16,6 +16,7 @@ import string
 import sys
 import time
 import urllib
+import urllib.parse
 from functools import partial
 from typing import List, Optional, Tuple, Type
 
