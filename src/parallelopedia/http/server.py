@@ -671,69 +671,25 @@ class HttpServer(asyncio.Protocol):
                     raise ValueError(f'Duplicate route: {route_path}')
                 self.routes[route_path] = (name, func)
 
-    def _add_apps_old(self, app_classes):
-        assert app_classes is not None
-        loop = asyncio.get_running_loop()
-        prefix = f'[loop id: {id(loop)} self id: {id(self)}] '
-        logging.debug(f'{prefix} Loading apps...')
-        for app_class in app_classes:
-            logging.debug(f'{prefix}    Loading app: {app_class.__name__}...')
-            app = app_class(server=self)
-            for _, value in app.routes.items():
-                (_, func) = value
-                logging.debug(f'{prefix}        Adding route: {func.funcname}')
-                func.target = app
-            self.apps.append(app)
-            self.routes.update(app.routes)
-            logging.debug(
-                f'{prefix}    Finished loading app: {app_class.__name__}.'
-            )
-        logging.debug(f'{prefix} Finished loading apps.')
-
     def connection_made(self, transport):
         self.transport = transport
         self.socket = self.transport.get_extra_info('socket')
-        loop = asyncio.get_running_loop()
-        prefix = f'[loop id: {id(loop)} self id: {id(self)}] '
-        logging.debug(
-            f'{prefix} connection made: transport id: {id(self.transport)}, '
-            f'socket: {self.socket}'
-        )
 
     def data_received(self, data):
-        loop = asyncio.get_running_loop()
-        prefix = f'[loop id: {id(loop)} self id: {id(self)}] '
-        logging.debug(
-            f'{prefix} data received: transport id: {id(self.transport)}, '
-            f'socket: {self.socket}, data: {data}'
-        )
         request = Request(self.transport, data)
         self.process_new_request(request)
 
         if not request.keep_alive:
-            request.transport.close()
-
-        if False:
-            if not request.keep_alive:
+            try:
                 request.transport.close()
-
-            response = request.response
-            if not response or response.sendfile:
-                return None
-            else:
-                return bytes(response)
+            except Exception:
+                pass
 
     def connection_lost(self, exc):
-        loop = asyncio.get_running_loop()
-        prefix = f'[loop id: {id(loop)} self id: {id(self)}] '
-        logging.debug(
-            f'{prefix} connection lost: {exc}: '
-            f'transport id: {id(self.transport)}, '
-            f'socket: {self.socket}'
-        )
         if exc:
             logging.warning(f'Connection lost: {exc}')
         self.transport = None
+        self.socket = None
 
     def process_new_request(self, request):
         raw = request.data
@@ -1306,9 +1262,7 @@ async def main_async(
             protocol class constructor.
 
     """
-
     loop = asyncio.get_running_loop()
-    logging.debug(f'Starting main_async() with loop: {loop} [{id(loop)}]')
 
     if os.name in ('nt', 'cygwin'):
         reuse_port = False
@@ -1339,13 +1293,16 @@ def start_event_loop(
     function.  It is intended to be the target of a threading.Thread.
 
     Arguments:
+
         args (argparse.Namespace): Supplies the command-line arguments.
+
         protocol_class (type): Supplies the protocol class to use.
+
         protocol_args (tuple): Supplies the arguments to pass to the
             protocol class constructor.
+
     """
     loop = asyncio.new_event_loop()
-    logging.debug(f'Created event loop: {loop} [{id(loop)}]')
     asyncio.set_event_loop(loop)
 
     asyncio.run(
@@ -1396,7 +1353,10 @@ def main(args: Optional[argparse.Namespace] = None):
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format='[TID %(thread)d] %(asctime)s - %(levelname)s - %(message)s',
+        format=(
+            '%(thread)d] %(asctime)s - %(levelname)s - '
+            '[thread: %(threadName)s/%(thread)d] - %(message)s '
+        )
     )
 
     if args.use_multithreaded_class_loader:

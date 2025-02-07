@@ -210,7 +210,7 @@ def get_huggingface_model(model_name: str) -> HuggingFaceModel:
     safetensors_path = f'{snapshots_dir}/model.safetensors'
     import safetensors
     timer = ElapsedTimer()
-    print(f'About to load safetensors from {safetensors_path}...')
+    logging.debug(f'About to load safetensors from {safetensors_path}...')
     with timer:
         st = safetensors.safe_open(
             safetensors_path,
@@ -221,7 +221,6 @@ def get_huggingface_model(model_name: str) -> HuggingFaceModel:
         f'Loaded safetensors from {safetensors_path} '
         f'in {timer.elapsed:.4f} seconds.'
     )
-    print(msg)
     logging.info(msg)
 
     config_path = f'{snapshots_dir}/config.json'

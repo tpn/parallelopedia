@@ -1025,11 +1025,6 @@ class GPT(nn.Module):
             seed = self.manual_seed
         sample_rng.manual_seed(seed)
 
-        logging.debug(
-            f'[generate_async_for] Starting generation loop for {text} '
-            f'with seed {seed}.'
-        )
-
         start_time = time.perf_counter()
         count = 0
         while x.size(1) < max_length:
@@ -1161,10 +1156,8 @@ class Gpt2App(HttpApp):
         try:
             transport = server.transport
         except AttributeError:
-            logging.debug('write: server.transport not found')
             pass
         if transport is not None:
-            logging.debug(f'{transport} writing:\n{response_bytes}')
             transport.write(response_bytes)
             return True
         else:
@@ -1174,14 +1167,6 @@ class Gpt2App(HttpApp):
         self, request: Request, text: str, **kwds: Dict
     ) -> None:
 
-        loop = asyncio.get_running_loop()
-        server = self.server
-        transport = server.transport
-
-        logging.debug(
-            f'[loop id: {id(loop)}, server id: {id(server)}, '
-            f'transport: {transport}]: generate_response() entered.'
-        )
         response = request.response
 
         response.code = 200
@@ -1314,17 +1299,10 @@ class Gpt2App(HttpApp):
         # point we're still within the call frame of the data_received()
         # protocol callback, which isn't an async function.
         loop = asyncio.get_running_loop()
-        logging.debug(
-            f'[loop id: {id(loop)}, server id: {id(self.server)}] '
-            f'generate() entered for transport {self.server.transport}: '
-            f'prompt: {prompt}, args: {args}, kwds: {kwds}.'
-        )
         assert self.task is None
-        self.task = loop.create_task(
-            self.generate_response(request, prompt, **kwds)
-        )
+        coro = self.generate_response(request, prompt, **kwds)
+        self.task = loop.create_task(coro)
         self.task.add_done_callback(self._task_complete)
-        # loop.create_task(self.generate_response(request, text, **kwds))
 
 
 def parse_arguments():
