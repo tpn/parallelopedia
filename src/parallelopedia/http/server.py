@@ -4,7 +4,6 @@
 import argparse
 import asyncio
 import html
-import inspect
 import json
 import logging
 import mimetypes
@@ -17,7 +16,6 @@ import sys
 import time
 import urllib
 import urllib.parse
-from functools import partial
 from typing import List, Optional, Tuple, Type
 
 from parallelopedia.http import (
@@ -169,152 +167,6 @@ def date_time_string(timestamp=None):
 
 
 gmtime = date_time_string
-
-
-class NotTrie(dict):
-    def longest_prefix_value(self, path):
-        p = path[1:]
-        if not p:
-            return
-        ix = p.find('/')
-        if ix == -1:
-            return self.get(path)
-        key = path[: ix + 1]
-        return self.get(key)
-
-
-try:
-    import datrie
-except ImportError:
-    def make_routes(allowed=None):
-        return NotTrie()
-else:
-    def make_routes(allowed: Optional[str] = None) -> "datrie.Trie":
-        if not allowed:
-            allowed = allowed_url_characters
-        return datrie.Trie(allowed)
-
-
-def router(routes=None):
-    if routes is None:
-        routes = make_routes()
-    _routes = routes
-
-    class route:
-        routes = _routes
-        _func = None
-        _funcname = None
-        _path = None
-        _target = None
-
-        def __init__(self, func_or_path):
-            if inspect.isfunction(func_or_path):
-                self.func = func_or_path
-            else:
-                self.path = func_or_path
-
-        @property
-        def path(self):
-            return self._path
-
-        @path.setter
-        def path(self, path):
-            if path[0] != '/':
-                path = '/' + self.path
-
-            self._path = path
-
-        @property
-        def func(self):
-            return self._func
-
-        @func.setter
-        def func(self, func):
-            self._func = func
-            self._funcname = func.__code__.co_name
-            if not self._path:
-                self._path = '/' + self._funcname
-
-            self.routes[self.path] = (self._funcname, self)
-
-        @property
-        def target(self):
-            return self._target
-
-        @target.setter
-        def target(self, target):
-            self._target = target
-
-        @property
-        def funcname(self):
-            return self._funcname
-
-        def __get__(self, obj, objtype=None):
-            if not obj:
-                return self.func
-            return partial(self, obj)
-
-        def __call__(self, *_args, **_kwds):
-            if not self.func:
-                func = _args[0]
-                self.func = func
-                return self
-
-            obj = _args[0]
-            request = _args[1]
-
-            # This will be the full path received, minus query string and
-            # fragment, e.g. '/offsets/Python'.
-            path = request.path[len(self.path):]
-
-            # In the case of '/offsets/Python', that'll leave us with
-            # '/Python', and we want to lop off the slash.  In the case of,
-            # say, '/stats', path will be empty.
-            if path and path[0] == '/':
-                if len(path) > 1:
-                    path = path[1:]
-                else:
-                    path = ''
-
-            # And that's it, the new path is passed to the callable as the
-            # second positional parameter.  If a fragment was present, pass
-            # that next.  Then pass a query string as **kwds if present.
-            args = []
-            if path:
-                path = urllib.parse.unquote(path)
-                args.append(path)
-            if request.fragment:
-                args.append(request.fragment)
-
-            try:
-                result = self.func(obj, request, *args, **request.query)
-                return result
-            except TypeError as e:
-                print(f'Error: {e}')
-                try:
-                    # Try without query string **kwds.
-                    return self.func(obj, request, *args)
-                except TypeError:
-                    # Try without fragment.
-                    try:
-                        return self.func(obj, request, path)
-                    except TypeError:
-                        # And finally, try without path.
-                        return self.func(obj, request)
-
-    def _decorator(*args, **kwds):
-        if args:
-            func = args[0]
-            if inspect.isfunction(func):
-                return route(func)
-            path = func
-
-        def _inner(f):
-            r = route(f)
-            r.path = path
-            return r
-
-    return _decorator
 
 
 def json_serialization(request=None, obj=None):
@@ -744,15 +596,43 @@ class HttpApp:
         self.server = server
 
 
-class PlaintextHttpApp(HttpApp):
-    routes = make_routes()
-    route = router(routes)
+def route(func=None, *, prefix=""):
+    """
+    Decorator for marking a function as a route, optionally with a prefix.
+
+    Args:
+
+        func (Callable): Supplies the function to mark as a route.
+
+        prefix (str): Optionally supplies a prefix to prepend to the route.
+
+    Returns:
+
+        Callable: Returns the decorated function.
+
+    """
+    if func is None:
+        def wrapper(f):
+            f.__is_route__ = True
+            f.__route_prefix__ = prefix
+            return f
+        return wrapper
+    else:
+        func.__is_route__ = True
+        func.__route_prefix__ = ""
+        return func
+
+
+class PlaintextApp(HttpApp):
 
     @route
     def plaintext(self, request):
         self.server.send_response(
             text_response(request, 'Hello, World!')
         )
+
+
+class SleeperApp(HttpApp):
 
     @route
     def sleep(self, request, seconds):
@@ -765,32 +645,73 @@ class PlaintextHttpApp(HttpApp):
 class HttpServer(asyncio.Protocol):
 
     def __init__(self, app_classes: Optional[List[Type[HttpApp]]] = None):
-        self.routes = make_routes()
+        self.routes = {}
         self.apps = []
         if app_classes:
             self._add_apps(app_classes)
+        self.socket = None
 
     def _add_apps(self, app_classes):
-        assert app_classes is not None
         for app_class in app_classes:
-            logging.debug(f'Loading app: {app_class.__name__}...')
+            app = app_class(server=self)
+            self.apps.append(app)
+
+            for name in dir(app):
+                func = getattr(app, name)
+                if not callable(func):
+                    continue
+                if not hasattr(func, '__is_route__'):
+                    continue
+
+                route_prefix = getattr(func, '__route_prefix__', '')
+                route_path = route_prefix + name
+                if not route_path.startswith('/'):
+                    route_path = '/' + route_path
+                if route_path in self.routes:
+                    raise ValueError(f'Duplicate route: {route_path}')
+                self.routes[route_path] = (name, func)
+
+    def _add_apps_old(self, app_classes):
+        assert app_classes is not None
+        loop = asyncio.get_running_loop()
+        prefix = f'[loop id: {id(loop)} self id: {id(self)}] '
+        logging.debug(f'{prefix} Loading apps...')
+        for app_class in app_classes:
+            logging.debug(f'{prefix}    Loading app: {app_class.__name__}...')
             app = app_class(server=self)
             for _, value in app.routes.items():
                 (_, func) = value
-                logging.debug(f'    Adding route: {func.funcname}')
+                logging.debug(f'{prefix}        Adding route: {func.funcname}')
                 func.target = app
             self.apps.append(app)
             self.routes.update(app.routes)
-            logging.debug(f'Finished loading app: {app_class.__name__}.')
+            logging.debug(
+                f'{prefix}    Finished loading app: {app_class.__name__}.'
+            )
+        logging.debug(f'{prefix} Finished loading apps.')
 
     def connection_made(self, transport):
-        logging.debug("Connection made with transport: %s", transport)
         self.transport = transport
+        self.socket = self.transport.get_extra_info('socket')
+        loop = asyncio.get_running_loop()
+        prefix = f'[loop id: {id(loop)} self id: {id(self)}] '
+        logging.debug(
+            f'{prefix} connection made: transport id: {id(self.transport)}, '
+            f'socket: {self.socket}'
+        )
 
     def data_received(self, data):
-        logging.debug("Data received: %s", data)
+        loop = asyncio.get_running_loop()
+        prefix = f'[loop id: {id(loop)} self id: {id(self)}] '
+        logging.debug(
+            f'{prefix} data received: transport id: {id(self.transport)}, '
+            f'socket: {self.socket}, data: {data}'
+        )
         request = Request(self.transport, data)
         self.process_new_request(request)
+
+        if not request.keep_alive:
+            request.transport.close()
 
         if False:
             if not request.keep_alive:
@@ -803,6 +724,13 @@ class HttpServer(asyncio.Protocol):
                 return bytes(response)
 
     def connection_lost(self, exc):
+        loop = asyncio.get_running_loop()
+        prefix = f'[loop id: {id(loop)} self id: {id(self)}] '
+        logging.debug(
+            f'{prefix} connection lost: {exc}: '
+            f'transport id: {id(self.transport)}, '
+            f'socket: {self.socket}'
+        )
         if exc:
             logging.warning(f'Connection lost: {exc}')
         self.transport = None
@@ -876,11 +804,6 @@ class HttpServer(asyncio.Protocol):
         version = version.decode()
         raw_path = raw_path.decode()
 
-        # Eh, urllib.parse.urlparse doesn't work here... I took a look at the
-        # source and figure it's either because of all the global caching
-        # going on, or it's using a generator somewhere.  So, let's just
-        # manually unpack the url as needed.  (Update: probably should review
-        # this assumption now that we've supposedly fixed generators.)
         url = raw_path
         if '#' in url:
             (url, request.fragment) = url.split('#', 1)
@@ -940,44 +863,60 @@ class HttpServer(asyncio.Protocol):
                 except InvalidRangeRequest:
                     h.range = None
 
-        # This routing/dispatching logic is quite possibly the most horrendous
-        # thing I've ever written.  On the other hand, it gets the immediate
-        # job done, so eh.
-        self._pre_route(request)
-        func = self._dispatch(request)
-        if not func:
-            return self.error(request, 400, 'Unsupported Method')
-
-        return func(request)
-
-    def _pre_route(self, request):
-        """Fiddle with request.path if necessary here."""
-        return None
-
-    def _route(self, request):
-        """Override in subclass if desired.  Return a callable."""
-        if not self.routes:
-            return
-        try:
-            value = self.routes.longest_prefix_value(request.path)
-            if value:
-                (_, func) = value
-                target = func.target
-                return lambda r: func(target, r)
-        except (KeyError, AttributeError):
-            pass
+        return self._dispatch(request)
 
     def _dispatch(self, request):
-        func = self._route(request)
+        path = request.path
+
+        for route_path, (name, func) in self.routes.items():
+            if not path.startswith(route_path):
+                continue
+
+            # Extract remaining path.
+            remaining_path = path[len(route_path):]
+            if remaining_path and remaining_path[0] == '/':
+                # Remove leading slash.
+                remaining_path = remaining_path[1:]
+
+            args = []
+            if remaining_path:
+                args.append(urllib.parse.unquote(remaining_path))
+
+            if request.fragment:
+                args.append(request.fragment)
+
+            try:
+                # Attempt to call the function with all arguments.
+                return func(request, *args, **request.query)
+            except TypeError as e:
+                msg = f'func(request, *args, **request.query) failed: {e}'
+                logging.debug(msg)
+                # Try calling without **kwds
+                try:
+                    return func(request, *args)
+                except TypeError as e:
+                    msg = f'func(request, *args) failed: {e}'
+                    logging.debug(msg)
+                    # Try calling with just path argument
+                    try:
+                        return func(request, remaining_path)
+                    except TypeError as e:
+                        msg = f'func(request, remaining_path) failed: {e}'
+                        logging.debug(msg)
+                        # Finally, try calling with just request
+                        return func(request)
+
+        func = self._simple_overload_dispatch(request)
         if not func:
-            func = self._simple_overload_dispatch(request)
-        return func
+            return self.error(request, 404, "File not found")
+        else:
+            return func(request)
 
     def _simple_overload_dispatch(self, request):
         func = None
         path = request.path
         command = request.command
-        funcname = 'do_%s' % command
+        funcname = f'do_{command}'
         overload_suffix = path.replace('/', '_')
         if overload_suffix[-1] == '_':
             overload_suffix = overload_suffix[:-1]
@@ -1063,7 +1002,10 @@ class HttpServer(asyncio.Protocol):
                 # Note: a link to a directory displays with @ and links with /
                 displayname = name + "@"
 
-            item = item_fmt % (url_unquote(linkname), html_escape(displayname))
+            item = item_fmt % (
+                url_unquote(linkname),
+                html_escape(displayname)
+            )
             items.append(item)
 
         items = '\n'.join(items)
@@ -1333,6 +1275,11 @@ def parse_arguments():
         help='Space-separated list of HTTP application classes.',
     )
     parser.add_argument(
+        '--use-multithreaded-class-loader',
+        action='store_true',
+        help='Use a multi-threaded class loader.',
+    )
+    parser.add_argument(
         '--listen-backlog',
         type=int,
         default=100,
@@ -1350,13 +1297,18 @@ async def main_async(
     call serve_forever() on it.
 
     Arguments:
+
         args (argparse.Namespace): Supplies the command-line arguments.
+
         protocol_class (type): Supplies the protocol class to use.
+
         protocol_args (tuple): Supplies the arguments to pass to the
             protocol class constructor.
 
     """
+
     loop = asyncio.get_running_loop()
+    logging.debug(f'Starting main_async() with loop: {loop} [{id(loop)}]')
 
     if os.name in ('nt', 'cygwin'):
         reuse_port = False
@@ -1373,6 +1325,7 @@ async def main_async(
         reuse_address=reuse_address,
         reuse_port=reuse_port,
     )
+    logging.debug(f'Server started: {server} [loop id: {id(loop)}]')
 
     async with server:
         await server.serve_forever()
@@ -1391,6 +1344,10 @@ def start_event_loop(
         protocol_args (tuple): Supplies the arguments to pass to the
             protocol class constructor.
     """
+    loop = asyncio.new_event_loop()
+    logging.debug(f'Created event loop: {loop} [{id(loop)}]')
+    asyncio.set_event_loop(loop)
+
     asyncio.run(
         main_async(
             args,
@@ -1439,11 +1396,18 @@ def main(args: Optional[argparse.Namespace] = None):
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format='%(asctime)s - %(levelname)s - %(message)s',
+        format='[TID %(thread)d] %(asctime)s - %(levelname)s - %(message)s',
     )
 
-    # Use multiple threads to load the application classes.
-    app_classes = get_classes_from_strings_parallel(args.app_classes)
+    if args.use_multithreaded_class_loader:
+        app_classes = get_classes_from_strings_parallel(
+            args.app_classes
+        )
+    else:
+        app_classes = [
+            get_class_from_string(app_class)
+            for app_class in args.app_classes
+        ]
 
     protocol_class = get_class_from_string(args.protocol_class)
     protocol_args = (app_classes,)

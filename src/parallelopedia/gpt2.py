@@ -33,8 +33,7 @@ from parallelopedia.http.server import (
     HttpApp,
     HttpServer,
     Request,
-    make_routes,
-    router,
+    route,
 )
 from parallelopedia.util import ElapsedTimer, get_huggingface_model, join_path
 
@@ -189,6 +188,8 @@ OOPS_NON_PRINTABLE_ENCOUNTERED = (
     'Oops! Non-printable token encountered.  Generation terminated.'
 )
 DEFAULT_MANUAL_SEED = 42
+TRY_JIT_COMPILE = False
+TRY_TORCH_COMPILE = False
 
 # =============================================================================
 # Setup
@@ -902,7 +903,7 @@ class GPT(nn.Module):
 
         return text + ''.join(output)
 
-    @torch.compile
+    # @torch.compile
     def generate_slim(
         self, text_tokens: torch.Tensor, max_length: int = 1024,
         top_k: int = 50, seed: int = None,
@@ -940,10 +941,10 @@ class GPT(nn.Module):
         ).unsqueeze(0)
 
         # Create a random generator for reproducibility.
-        #sample_rng = torch.Generator(device=device)
-        #if seed is None:
-        #    seed = self.manual_seed
-        #sample_rng.manual_seed(seed)
+        # sample_rng = torch.Generator(device=device)
+        # if seed is None:
+        #     seed = self.manual_seed
+        # sample_rng.manual_seed(seed)
 
         # Generate tokens up to our max length, or until we hit the stop token.
         for _ in range(max_length):
@@ -964,7 +965,7 @@ class GPT(nn.Module):
             next_idx = torch.multinomial(
                 topk_probs,
                 num_samples=1,
-                #generator=sample_rng,
+                # generator=sample_rng,
             )
             next_token = torch.gather(topk_indices, -1, next_idx)  # (1, 1)
 
@@ -978,7 +979,6 @@ class GPT(nn.Module):
 
         return x
 
-
     async def generate_async_for(
         self, text: str, max_length: int = 1024, top_k: int = 50,
         seed: int = None,
@@ -989,19 +989,26 @@ class GPT(nn.Module):
 
         Arguments:
 
-            text (str): Supplies the prompt to condition on.
+            text (str): Supplies the prompt.
 
-            max_length (int): Maximum total length (prompt + generated).
+            max_length (int): Supplies the maximum total length,
+                including prompt.
 
-            top_k (int): Number of tokens to consider at each generation step.
+            top_k (int): Supplies the number of tokens to consider
+                at each generation step.
 
-            seed (int): Optionally supplies the manual seed to use for the
-                generator.  If None, the model's manual seed will be used.
+            seed (int): Optionally supplies the manual seed to use
+                for the generator.  If None, the model's manual
+                seed will be used.
+
+        Returns:
+
+            str: The generated text (including the initial prompt).
 
         Yields:
 
-            byte: The newly generated text token (decoded).  If -1, a
-            non-printable token was generated, and generation was terminated.
+            byte: The newly generated decoded token.  If -1, a non-printable
+            token was generated, and generation was terminated.
         """
 
         enc = self.enc
@@ -1046,7 +1053,7 @@ class GPT(nn.Module):
                 num_samples=1,
                 generator=sample_rng,
             )
-            next_token = torch.gather(topk_indices, -1, next_idx)  # (1, 1)
+            next_token = torch.gather(topk_indices, -1, next_idx)
 
             # If the next token is the stop token, we're done.
             next_token_item = next_token.item()
@@ -1058,11 +1065,12 @@ class GPT(nn.Module):
             # the entire sequence for subsequent generation steps.
             x = torch.cat((x, next_token), dim=1)
 
-            # Decode the newly-generated token.
+            # Decode the newly-generated token.  Note that a single token may
+            # decode to multiple characters.
             new_text_fragment = enc.decode([next_token.item()])
 
-            # If the next token isn't printable, terminate generation.  (With
-            # our locally-trained GPT2 124M model, this happens quite often.)
+            # If any of the next characters in the decoded text representation
+            # aren't printable, terminate generation.
             if not all(c in self.printable for c in new_text_fragment):
                 yield -1
                 break
@@ -1081,12 +1089,16 @@ class GPT(nn.Module):
 
 
 class Gpt2App(HttpApp):
-    routes = make_routes()
-    route = router(routes)
 
     def __init__(self, server: HttpServer) -> None:
         super().__init__(server)
         self.printable = PRINTABLE
+        self.task = None
+
+    def _task_complete(self, task):
+        assert self.task is not None
+        assert self.task is task
+        self.task = None
 
     @classmethod
     def init_once(cls):
@@ -1097,7 +1109,8 @@ class Gpt2App(HttpApp):
 
         # This doesn't work because torch.jit doesn't handle our
         # async generator.
-        if False:
+        global TRY_JIT_COMPILE
+        if TRY_JIT_COMPILE:
             for (i, model) in enumerate(MODELS):
                 model.config = dataclasses.asdict(model.config)
                 timer = ElapsedTimer()
@@ -1108,7 +1121,8 @@ class Gpt2App(HttpApp):
                     f'JIT compiled model {i} in {timer.elapsed:.3f} seconds.'
                 )
 
-        if True:
+        global TRY_TORCH_COMPILE
+        if TRY_TORCH_COMPILE:
             for (i, model) in enumerate(MODELS):
                 model.config = dataclasses.asdict(model.config)
                 timer = ElapsedTimer()
@@ -1147,8 +1161,10 @@ class Gpt2App(HttpApp):
         try:
             transport = server.transport
         except AttributeError:
+            logging.debug('write: server.transport not found')
             pass
         if transport is not None:
+            logging.debug(f'{transport} writing:\n{response_bytes}')
             transport.write(response_bytes)
             return True
         else:
@@ -1158,6 +1174,14 @@ class Gpt2App(HttpApp):
         self, request: Request, text: str, **kwds: Dict
     ) -> None:
 
+        loop = asyncio.get_running_loop()
+        server = self.server
+        transport = server.transport
+
+        logging.debug(
+            f'[loop id: {id(loop)}, server id: {id(server)}, '
+            f'transport: {transport}]: generate_response() entered.'
+        )
         response = request.response
 
         response.code = 200
@@ -1284,13 +1308,23 @@ class Gpt2App(HttpApp):
 
     @route
     def generate(self, request: Request, *args: List, **kwds: Dict) -> None:
-        text = args[0]
+        prompt = args[0]
         # Obtain the event loop and schedule the response generation via our
         # async generation coroutine.  We have to do it like this as at this
         # point we're still within the call frame of the data_received()
         # protocol callback, which isn't an async function.
         loop = asyncio.get_running_loop()
-        loop.create_task(self.generate_response(request, text, **kwds))
+        logging.debug(
+            f'[loop id: {id(loop)}, server id: {id(self.server)}] '
+            f'generate() entered for transport {self.server.transport}: '
+            f'prompt: {prompt}, args: {args}, kwds: {kwds}.'
+        )
+        assert self.task is None
+        self.task = loop.create_task(
+            self.generate_response(request, prompt, **kwds)
+        )
+        self.task.add_done_callback(self._task_complete)
+        # loop.create_task(self.generate_response(request, text, **kwds))
 
 
 def parse_arguments():
@@ -1449,7 +1483,6 @@ def main():
             model = torch.jit.script(model)
         logging.info(f'JIT compiled model in {timer.elapsed:.3f} seconds.')
 
-
     seed = args.seed
     if seed is None or seed == '':
         seed = random.randint(0, 2**32 - 1)
@@ -1483,6 +1516,7 @@ def main():
                 seed=seed,
             )
         print(output)
+
 
 if __name__ == '__main__':
     main()
