@@ -9,11 +9,15 @@ This file is based on the `train_gpt2.py` file in Andrej Karpathy's
 
 import asyncio
 import dataclasses
+import datetime
 import itertools
+import json
 import logging
 import os
 import random
 import string
+import sys
+import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -190,6 +194,10 @@ OOPS_NON_PRINTABLE_ENCOUNTERED = (
 DEFAULT_MANUAL_SEED = 42
 TRY_JIT_COMPILE = False
 TRY_TORCH_COMPILE = False
+TORCH_COMPILE_KWDS = {
+    'fullgraph': True,
+    'mode': 'max-autotune',
+}
 
 # =============================================================================
 # Setup
@@ -802,9 +810,10 @@ class GPT(nn.Module):
 
         return (logits, loss)
 
+    # @torch.compile
     def generate(
         self, text: str, max_length: int = 1024, top_k: int = 50,
-        seed: int = None,
+        seed: int = None, save_rate: callable = None
     ) -> str:
         """
         Generate text from the model.
@@ -819,6 +828,9 @@ class GPT(nn.Module):
 
             seed (int): Optionally supplies the manual seed to use for the
                 generator.  If None, the model's manual seed will be used.
+
+            save_rate (callable): Optionally supplies a callable that will be
+                called with the tokens per second rate.
 
         Returns:
 
@@ -894,6 +906,8 @@ class GPT(nn.Module):
         end = time.perf_counter()
         elapsed = end - start
         tokens_per_sec = float(count) / elapsed
+        if save_rate:
+            save_rate(tokens_per_sec)
 
         msg = (
             f'Generated {count} tokens in {elapsed:.2f} seconds '
@@ -970,9 +984,9 @@ class GPT(nn.Module):
             next_token = torch.gather(topk_indices, -1, next_idx)  # (1, 1)
 
             # If the next token is the stop token, we're done.
-            next_token_item = next_token.item()
-            if next_token_item == stop_token:
-                break
+            # next_token_item = next_token.item()
+            # if next_token_item == stop_token:
+            #    break
 
             # Append token to current sequence.
             x = torch.cat((x, next_token), dim=1)
@@ -1089,11 +1103,7 @@ class Gpt2App(HttpApp):
         super().__init__(server)
         self.printable = PRINTABLE
         self.task = None
-
-    def _task_complete(self, task):
-        assert self.task is not None
-        assert self.task is task
-        self.task = None
+        self.keep_alive = None
 
     @classmethod
     def init_once(cls):
@@ -1116,13 +1126,14 @@ class Gpt2App(HttpApp):
                     f'JIT compiled model {i} in {timer.elapsed:.3f} seconds.'
                 )
 
+        kwds = TORCH_COMPILE_KWDS
         global TRY_TORCH_COMPILE
         if TRY_TORCH_COMPILE:
             for (i, model) in enumerate(MODELS):
                 model.config = dataclasses.asdict(model.config)
                 timer = ElapsedTimer()
                 with timer:
-                    model = torch.compile(model)
+                    model = torch.compile(model, **kwds)
                     MODELS[i] = model
                 logging.info(
                     f'torch.compiled model {i} in '
@@ -1133,12 +1144,22 @@ class Gpt2App(HttpApp):
                 model.config = dataclasses.asdict(model.config)
                 timer = ElapsedTimer()
                 with timer:
-                    model = torch.compile(model)
+                    model = torch.compile(model, **kwds)
                     PRETRAINED_MODELS[i] = model
                 logging.info(
                     f'torch.compiled pretrained model {i} in '
                     f'{timer.elapsed:.3f} seconds.'
                 )
+
+    def _task_complete(self, task):
+        assert self.task is not None
+        assert self.task is task
+        self.task = None
+        if self.keep_alive is False:
+            try:
+                self.server.transport.close()
+            except Exception:
+                pass
 
     def is_connected(self):
         # server.transport will be severed when the client disconnects.
@@ -1302,6 +1323,7 @@ class Gpt2App(HttpApp):
         assert self.task is None
         coro = self.generate_response(request, prompt, **kwds)
         self.task = loop.create_task(coro)
+        self.keep_alive = request.keep_alive
         self.task.add_done_callback(self._task_complete)
 
 
@@ -1401,6 +1423,18 @@ def parse_arguments():
         default=3,
         help='Set the number of rounds for generation.',
     )
+    parser.add_argument(
+        '--wrap',
+        type=int,
+        default=60,
+        help='Set the wrap width for text output.',
+    )
+    parser.add_argument(
+        '--note',
+        type=str,
+        default='',
+        help='Set a note to include in the JSON output.',
+    )
     args = parser.parse_args()
     return args
 
@@ -1415,6 +1449,9 @@ def main():
         level=getattr(logging, args.log_level),
         format='%(asctime)s - %(levelname)s - %(message)s',
     )
+
+    start_time = time.time()
+    start_timestamp = datetime.datetime.now().isoformat()
 
     timer = ElapsedTimer()
     with timer:
@@ -1468,6 +1505,7 @@ def main():
     if args.generate_slim:
         text_tokens = model.enc.encode(args.prompt)
 
+    rates = []
     for i in range(args.rounds):
         logging.info(f'Round {i + 1} of {args.rounds}.')
         if args.generate_slim:
@@ -1481,20 +1519,90 @@ def main():
             elapsed = timer.elapsed
             count = x.size(1)
             tokens_per_sec = count / elapsed
+            rates.append(tokens_per_sec)
             logging.info(
                 f'Generated {count} tokens in {elapsed:.2f} seconds '
                 f'({tokens_per_sec:.2f} tokens/sec)'
             )
             output = model.enc.decode(x[0].tolist())
         else:
+            save_rate = lambda x: rates.append(x)
             output = model.generate(
                 args.prompt,
                 max_length=args.max_length,
                 top_k=args.top_k,
                 seed=seed,
+                save_rate=save_rate,
             )
-        print(output)
 
+        if args.wrap:
+            output = textwrap.fill(output, width=args.wrap)
+        logging.info(f'Output:\n{output}')
+
+    # The filename is of the form:
+    #   `gpt2-rates-<yyyy-mm-dd-hh-ss-mm.sss>-[optional].json`
+    now = datetime.datetime.now()
+    timestamp = now.strftime('%Y-%m-%d-%H-%M-%S-%f')
+    filename = f"gpt2-rates-{timestamp}"
+    if args.torch_compile:
+        filename += '-torch-compile'
+        if args.torch_compile_reduce_overhead:
+            filename += '-reduce-overhead'
+        elif args.torch_compile_max_autotune:
+            filename += '-max-autotune'
+        if args.torch_compile_fullgraph:
+            filename += '-fullgraph'
+    if args.generate_slim:
+        filename += '-generate-slim'
+
+    conda_env_name = os.environ.get('CONDA_DEFAULT_ENV', 'Unknown')
+    filename += f'-{conda_env_name}'
+
+    filename += '.json'
+
+    if not isinstance(model.config, dict):
+        model_config = dataclasses.asdict(model.config)
+    else:
+        model_config = model.config
+
+    end_time = time.time()
+    end_timestamp = datetime.datetime.now().isoformat()
+
+    if args.device.startswith('cuda'):
+        ix = args.device.find(':')
+        if ix == -1:
+            device_index = 0
+        else:
+            device_index = int(args.device[ix+1:])
+
+        device_name = torch.cuda.get_device_name(device_index)
+    else:
+        device_name = 'CPU'
+
+    try:
+        is_gil_enabled = sys._is_gil_enabled()
+    except AttributeError:
+        is_gil_enabled = False
+
+    # Prepare a dictionary with the details to save.
+    run_details = {
+        "rates": rates,
+        "model_config": model_config,
+        "args": vars(args),
+        "start_timestamp": start_timestamp,
+        "end_timestamp": end_timestamp,
+        "elapsed": f'{end_time - start_time:.3f}',
+        "device_name": device_name,
+        "conda_env_name": conda_env_name,
+        "is_gil_enabled": is_gil_enabled,
+        "note": args.note,
+    }
+
+    # Write the JSON file.
+    with open(filename, "w") as json_file:
+        json.dump(run_details, json_file, indent=4)
+
+    logging.info(f"Run details saved to {filename}.")
 
 if __name__ == '__main__':
     main()
