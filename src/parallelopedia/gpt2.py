@@ -1504,6 +1504,7 @@ def main():
 
     if args.generate_slim:
         text_tokens = model.enc.encode(args.prompt)
+        prompt_token_length = len(text_tokens)
 
     rates = []
     for i in range(args.rounds):
@@ -1517,7 +1518,7 @@ def main():
                     seed=seed,
                 )
             elapsed = timer.elapsed
-            count = x.size(1)
+            count = x.size(1) - prompt_token_length
             tokens_per_sec = count / elapsed
             rates.append(tokens_per_sec)
             logging.info(
