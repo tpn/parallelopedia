@@ -679,12 +679,6 @@ class HttpServer(asyncio.Protocol):
         request = Request(self.transport, data)
         self.process_new_request(request)
 
-        if not request.keep_alive:
-            try:
-                request.transport.close()
-            except Exception:
-                pass
-
     def connection_lost(self, exc):
         if exc:
             logging.warning(f'Connection lost: {exc}')
