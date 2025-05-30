@@ -156,32 +156,38 @@ else:
         global PRETRAINED_MODELS
         max_workers = min(TOTAL_MODELS, os.cpu_count())
         timer = ElapsedTimer()
-        with timer:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(
+        try:
+            with timer:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(
+                            GPT.from_pretrained,
+                            model_name='openai-community/gpt2-xl',
+                            map_location=f'cuda:{i}',
+                            torch_profile_activities=TORCH_PROFILE_ACTIVITIES,
+                        ): i for i in range(NUM_GPUS)
+                    }
+                    # Add the CPU model.
+                    futures[executor.submit(
                         GPT.from_pretrained,
                         model_name='openai-community/gpt2-xl',
-                        map_location=f'cuda:{i}',
+                        map_location='cpu',
                         torch_profile_activities=TORCH_PROFILE_ACTIVITIES,
-                    ): i for i in range(NUM_GPUS)
-                }
-                # Add the CPU model.
-                futures[executor.submit(
-                    GPT.from_pretrained,
-                    model_name='openai-community/gpt2-xl',
-                    map_location='cpu',
-                    torch_profile_activities=TORCH_PROFILE_ACTIVITIES,
-                )] = NUM_GPUS
-                for future in as_completed(futures):
-                    i = futures[future]
-                    model = future.result()
-                    PRETRAINED_MODELS[i] = model
-        msg = (
-            f'Loaded gpt2-xl model on {NUM_GPUS} GPU(s) and 1 CPU in '
-            f'{timer.elapsed:.3f} seconds.'
-        )
-        logging.info(msg)
+                    )] = NUM_GPUS
+                    for future in as_completed(futures):
+                        i = futures[future]
+                        model = future.result()
+                        PRETRAINED_MODELS[i] = model
+            msg = (
+                f'Loaded gpt2-xl model on {NUM_GPUS} GPU(s) and 1 CPU in '
+                f'{timer.elapsed:.3f} seconds.'
+            )
+            logging.info(msg)
+        except Exception as e:
+            logging.error(
+                f'Failed to load gpt2-xl model on {NUM_GPUS} GPU(s) and 1 CPU: '
+                f'{e}'
+            )
 
 
 # =============================================================================
