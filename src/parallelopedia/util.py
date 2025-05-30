@@ -71,7 +71,7 @@ def join_path(*args):
 
 
 def get_class_from_string(class_name: str,
-                          enforce_flake8: bool = True) -> type:
+                          enforce_flake8: bool = False) -> type:
     """
     Obtains an instance of a class object from a string representation of the
     class name, which may include the module name, e.g. `spam.eggs.Bacon`.
