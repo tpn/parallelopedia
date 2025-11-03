@@ -5,7 +5,7 @@ line_length = 79
 [tool.black]
 line_length = 79
 skip_string_normalization = true  # Keeps single/double quotes as they are
-target_version = ['py313']        # Target a specific Python version
+target_version = ['py314']        # Target a specific Python version
 exclude = '''
 /(
     \.git
