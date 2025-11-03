@@ -19,3 +19,29 @@ exclude = '''
     | dist
 )/
 '''
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parallelopedia"
+version = "0.1.0"
+description = "Parallelopedia library"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Trent Nelson" }]
+dependencies = [
+    "datrie",
+    "numpy",
+    "mwcomposerfromhell",
+    "mwparserfromhell",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["parallelopedia*"]
