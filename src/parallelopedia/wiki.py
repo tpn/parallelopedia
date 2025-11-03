@@ -31,8 +31,7 @@ from parallelopedia.http.server import (
     RangedRequest,
     Request,
     date_time_string,
-    make_routes,
-    router,
+    route,
 )
 
 from .util import join_path, ElapsedTimer
@@ -248,8 +247,6 @@ def get_page_offsets_for_key(search_string: str) -> List[Tuple[str, int, int]]:
 # =============================================================================
 
 class WikiApp(HttpApp):
-    routes = make_routes()
-    route = router(routes)
 
     @classmethod
     def init_once(cls):
@@ -325,7 +322,7 @@ class WikiApp(HttpApp):
         if not rr:
             return server.error(request, 400, "Ranged-request required.")
 
-        if not rr.set_file_size_safe(WIKI_XML_SIZE, self):
+        if not rr.set_file_size_safe(WIKI_XML_SIZE, self.server):
             return
 
         response = request.response
