@@ -190,6 +190,48 @@ else:
             )
 
 
+def torch_cuda_device_props_to_http_response_header_dict(
+    gpu_props
+) -> Dict[str, str]:
+    gp = gpu_props
+    headers = {}
+    specs = {
+        'X-GPU-Name': lambda: gp.name,
+        'X-GPU-Compute-Capability': lambda: f'{gp.major}.{gp.minor}',
+        'X-GPU-Num-Multi-Processors': lambda: str(gp.multi_processor_count),
+        'X-GPU-PCI': lambda: (
+            f'{gp.pci_bus_id}.{gp.pci_device_id}.{gp.pci_domain_id}'
+        ),
+        'X-GPU-Memory-Total': lambda: str(gp.total_memory),
+        'X-GPU-Memory-Bus-Width': lambda: str(gp.memory_bus_width),
+        'X-GPU-Memory-Clock-Rate': lambda: (
+            f'{gp.memory_clock_rate / 1e3:.0f} MHz'
+        ),
+        'X-GPU-L2-Cache-Size': lambda: str(gp.l2_cache_size),
+        'X-GPU-Clock-Rate': lambda: f'{gp.clock_rate / 1e3:.0f} MHz',
+        'X-GPU-Max-Threads-Per-Multi-Processor': lambda: str(
+            gp.max_threads_per_multi_processor
+        ),
+        'X-GPU-Registers-Per-Multiprocessor': lambda: str(
+            gp.regs_per_multiprocessor
+        ),
+        'X-GPU-Shared-Memory-Per-Block': lambda: (
+            f'{gp.shared_memory_per_block / 1e3:.0f} KB'
+        ),
+        'X-GPU-Shared-Memory-Per-Multiprocessor': lambda: (
+            f'{gp.shared_memory_per_multiprocessor / 1e3:.0f} KB'
+        ),
+        'X-GPU-Warp-Size': lambda: f'{gp.warp_size} bytes',
+    }
+
+    for key, fn in specs.items():
+        try:
+            headers[key] = fn()
+        except AttributeError:
+            continue
+
+    return headers
+
 # =============================================================================
 # Globals
 # =============================================================================
@@ -204,6 +246,16 @@ TORCH_COMPILE_KWDS = {
     'fullgraph': True,
     'mode': 'max-autotune',
 }
+
+CUDA_GPU_PROPS = {}
+CUDA_GPU_PROPS_HTTP_HEADERS = {}
+if not CPU_ONLY:
+    for i in range(NUM_GPUS):
+        props = torch.cuda.get_device_properties(i)
+        CUDA_GPU_PROPS[f'cuda:{i}'] = props
+        CUDA_GPU_PROPS_HTTP_HEADERS[f'cuda:{i}'] = (
+            torch_cuda_device_props_to_http_response_header_dict(props)
+        )
 
 # =============================================================================
 # Setup
@@ -1230,6 +1282,7 @@ class Gpt2App(HttpApp):
             get_next = get_next_model
 
         model = None
+        gpu_index = None
         if device is not None:
             if device == 'cpu':
                 model = models[-1]
@@ -1242,13 +1295,30 @@ class Gpt2App(HttpApp):
                     index = -1
                 if index != -1:
                     model = models[index]
+                    gpu_index = index
             elif device == 'cuda':
-                model = models[random.randint(0, NUM_GPUS - 1)]
+                index = random.randint(0, NUM_GPUS - 1)
+                model = models[index]
+                gpu_index = index
 
         if not model:
             # Get a model.  If there are multiple models available, e.g. if we
             # have multiple GPUs, this will balance the load a bit.
             model = get_next()
+
+        # If a specific GPU wasn't explicitly chosen above, infer it from the
+        # selected model's device so we can attach GPU headers.
+        if gpu_index is None and hasattr(model, 'device'):
+            dev = model.device
+            if isinstance(dev, str) and dev.startswith('cuda:'):
+                try:
+                    gpu_index = int(dev.split(':', 1)[1])
+                except ValueError:
+                    pass
+
+        gpu_http_headers = None
+        if gpu_index is not None:
+            gpu_http_headers = CUDA_GPU_PROPS_HTTP_HEADERS[f'cuda:{gpu_index}']
 
         expose_headers = (
             'Access-Control-Expose-Headers: '
@@ -1258,14 +1328,25 @@ class Gpt2App(HttpApp):
             'X-Model-Name, '
             'X-Model-Device'
         )
-        response.other_headers.extend([
-            expose_headers,
+
+        if gpu_http_headers is not None:
+            expose_headers += f', {", ".join(gpu_http_headers.keys())}'
+
+        other_headers = [
             f'X-Max-Length: {max_length}',
             f'X-Top-K: {top_k}',
             f'X-Seed: {seed}',
             f'X-Model-Name: {model_name}',
             f'X-Model-Device: {model.device}',
-        ])
+        ]
+        if gpu_http_headers is not None:
+            other_headers.extend([
+                f'{k}: {v}' for k, v in gpu_http_headers.items()
+            ])
+
+        # Ensure custom response headers are visible to browsers.
+        response.other_headers.append(expose_headers)
+        response.other_headers.extend(other_headers)
 
         # We want to enable TCP_NODELAY for the duration of the response.
         # This ensures packets are sent immediately without any internal
