@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import datetime
 import itertools
+import functools
 import json
 import logging
 import os
@@ -189,6 +190,9 @@ else:
                 f'{e}'
             )
 
+# #############################################################################
+# Helpers
+# #############################################################################
 
 def torch_cuda_device_props_to_http_response_header_dict(
     gpu_props
@@ -231,6 +235,53 @@ def torch_cuda_device_props_to_http_response_header_dict(
             continue
 
     return headers
+
+@functools.cache
+def get_gpt2_tokenizer_and_stop() -> Tuple[object, int, str]:
+    """
+    Get a GPT-2 tokenizer and the stop token ID.
+
+    Returns:
+
+        tuple: A tuple containing the tokenizer object, the stop token ID,
+            and the tokenizer type ("tiktoken" or "hf").
+    """
+    try:
+        # Prefer tiktoken if available and has modern API.
+        if hasattr(tiktoken, "get_encoding"):
+            enc = tiktoken.get_encoding("gpt2")
+            stop_id = enc.n_vocab - 1
+            return enc, stop_id, "tiktoken"
+        if hasattr(tiktoken, "encoding_for_model"):
+            enc = tiktoken.encoding_for_model("gpt2")
+            stop_id = enc.n_vocab - 1
+            return enc, stop_id, "tiktoken"
+    except Exception:
+        pass
+    # Fallback: Hugging Face tokenizer
+    try:
+        from transformers import GPT2TokenizerFast
+        hf_tok = GPT2TokenizerFast.from_pretrained("gpt2")
+        class _HFTokenizerWrapper:
+            def __init__(self, tok):
+                self._tok = tok
+                self.n_vocab = tok.vocab_size
+            def encode(self, text):
+                return self._tok.encode(text, add_special_tokens=False)
+            def decode(self, tokens):
+                return self._tok.decode(
+                    tokens,
+                    clean_up_tokenization_spaces=False,
+                    skip_special_tokens=False,
+                )
+        wrapper = _HFTokenizerWrapper(hf_tok)
+        stop_id = getattr(hf_tok, "eos_token_id", wrapper.n_vocab - 1)
+        return wrapper, stop_id, "hf"
+    except Exception as e:
+        raise RuntimeError(
+            "No usable tokenizer found. Please install 'tiktoken' or 'transformers'."
+        ) from e
+
 
 # =============================================================================
 # Globals
@@ -559,12 +610,13 @@ class GPT(nn.Module):
             msg = f'Loaded model weights in {timer.elapsed:.3f} seconds.'
             logging.info(msg)
 
-        # Obtain the tokenizer for GPT2, and resolve the stop token.
-        enc = tiktoken.get_encoding("gpt2")
-        stop_string = '<|endoftext|>'
-        stop_token = enc.n_vocab - 1
-        actual = enc.decode([stop_token])
-        assert actual == stop_string, f"expected {stop_string}, got {actual}"
+        enc, stop_token, enc_type = get_gpt2_tokenizer_and_stop()
+        # Validate the stop token for tiktoken; Hugging Face decodes EOS
+        # differently.
+        if enc_type == "tiktoken":
+            stop_string = '<|endoftext|>'
+            actual = enc.decode([stop_token])
+            assert actual == stop_string, f"expected {stop_string}, got {actual}"
         self.enc = enc
         self.stop_token = stop_token
 
