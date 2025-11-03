@@ -1148,7 +1148,10 @@ class HttpServer(asyncio.Protocol):
     def send_response(self, request):
         response = request.response
         if request.command == 'HEAD':
-            # HEAD requests don't get a body.
+            # HEAD requests don't get a body.  But we want to capture the
+            # content length before dropping it.
+            body = response.body
+            response.content_length = len(body) if body else 0
             response.body = None
         if response:
             response_bytes = bytes(response)
