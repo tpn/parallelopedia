@@ -443,7 +443,11 @@ class GPTCheckpoint:
             GPTCheckpoint: A new GPTCheckpoint instance.
 
         """
-        data = torch.load(checkpoint_path, map_location=device)
+        data = torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
         checkpoint = cls(
             model=data["model"],
             step=data["step"],
