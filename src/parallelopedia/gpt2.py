@@ -209,8 +209,12 @@ TORCH_COMPILE_KWDS = {
 # Setup
 # =============================================================================
 
-# Use bfloat16 for matmul precision where possible.
-torch.set_float32_matmul_precision('high')
+# Use tf32 for matmul precision where possible.
+try:
+    torch.backends.cudnn.conv.fp32_precision = 'tf32'
+    torch.backends.cuda.matmul.allow_tf32 = True
+except Exception:
+    torch.set_float32_matmul_precision('high')
 
 # =============================================================================
 # Classes
