@@ -595,20 +595,33 @@ class GPT(nn.Module):
         msg = f'Initialized GPT model in {timer.elapsed:.3f} seconds.'
         logging.info(msg)
 
-        if checkpoint.model:
-            with timer:
-                if not self.torch_profile_activities:
-                    self.load_state_dict(checkpoint.model)
-                else:
-                    with torch.profiler.profile(
-                        activities=self.torch_profile_activities,
-                        with_stack=True,
-                    ) as prof:
-                        self.load_state_dict(checkpoint.model)
-                    self.torch_profile_load_state = prof
+        # Check to see if the first model key starts with '_orig_mod.'; if so,
+        # strip that prefix from all keys (if it's present on the first, we
+        # can assume it will be present on all).  This happens when loading
+        # models straight from build-nanogpt checkpoint saves, for whatever
+        # reason.
+        model = checkpoint.model
+        assert isinstance(model, dict)
+        key = next(iter(model))
+        if key.startswith('_orig_mod.'):
+            new_model = {
+                (k.replace('_orig_mod.', '')): v for (k, v) in model.items()
+            }
+            checkpoint.model = new_model
 
-            msg = f'Loaded model weights in {timer.elapsed:.3f} seconds.'
-            logging.info(msg)
+        with timer:
+            if not self.torch_profile_activities:
+                self.load_state_dict(checkpoint.model)
+            else:
+                with torch.profiler.profile(
+                    activities=self.torch_profile_activities,
+                    with_stack=True,
+                ) as prof:
+                     self.load_state_dict(checkpoint.model)
+                self.torch_profile_load_state = prof
+
+        msg = f'Loaded model weights in {timer.elapsed:.3f} seconds.'
+        logging.info(msg)
 
         enc, stop_token, enc_type = get_gpt2_tokenizer_and_stop()
         # Validate the stop token for tiktoken; Hugging Face decodes EOS
