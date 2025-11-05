@@ -40,26 +40,30 @@ from .util import join_path, ElapsedTimer
 # Configuration
 # =============================================================================
 
-# If the environment variable PARALLELOPEDIA_DATA_DIR is set, use that instead.
 if 'PARALLELOPEDIA_DATA_DIR' in os.environ:
     DATA_DIR = os.environ['PARALLELOPEDIA_DATA_DIR']
 else:
     DATA_DIR = join_path(dirname(__file__), '../../data')
 
-# N.B. This file is huge when unzipped: ~53GB.
-WIKI_XML_NAME = 'enwiki-20150205-pages-articles.xml'
+if 'PARALLELOPEDIA_WIKI_XML_NAME' in os.environ:
+    WIKI_XML_NAME = os.environ['PARALLELOPEDIA_WIKI_XML_NAME']
+else:
+    WIKI_XML_NAME = 'enwiki-20150205-pages-articles.xml'
+
 if 'PARALLELOPEDIA_WIKI_XML_DIR' in os.environ:
+    WIKI_XML_DIR = os.environ['PARALLELOPEDIA_WIKI_XML_DIR']
     WIKI_XML_PATH = join_path(
         os.environ['PARALLELOPEDIA_WIKI_XML_DIR'], WIKI_XML_NAME
     )
 else:
+    WIKI_XML_DIR = DATA_DIR
     WIKI_XML_PATH = join_path(DATA_DIR, WIKI_XML_NAME)
 
 # The directory where the title tries are stored.
 if 'PARALLELOPEDIA_WIKI_TITLE_TRIES_DIR' in os.environ:
     TRIES_DIR = os.environ['PARALLELOPEDIA_WIKI_TITLE_TRIES_DIR']
 else:
-    TRIES_DIR = DATA_DIR
+    TRIES_DIR = WIKI_XML_DIR
 
 # This is a sorted numpy array of uint64s representing the byte offset values
 # in the tries.  When given the byte offset of a title derived from a trie
@@ -72,9 +76,12 @@ if 'PARALLELOPEDIA_WIKI_TITLES_OFFSETS_NPY_DIR' in os.environ:
         os.environ['PARALLELOPEDIA_WIKI_TITLES_OFFSETS_NPY_DIR']
     )
 else:
-    TITLES_OFFSETS_NPY_DIR = DATA_DIR
+    TITLES_OFFSETS_NPY_DIR = WIKI_XML_DIR
 
-TITLES_OFFSETS_NPY_PATH = join_path(DATA_DIR, 'titles_offsets.npy')
+TITLES_OFFSETS_NPY_PATH = join_path(
+    TITLES_OFFSETS_NPY_DIR,
+    'titles_offsets.npy',
+)
 
 # Number of partitions for the title tries.
 PARTITIONS = 127

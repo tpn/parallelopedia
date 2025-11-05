@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from os.path import abspath, join, normpath
-from typing import List
+from typing import Dict, List
 
 # =============================================================================
 # Aliases
@@ -247,5 +247,48 @@ def get_huggingface_model(model_name: str) -> HuggingFaceModel:
         tokenizer_config,
         vocab,
     )
+
+def torch_cuda_device_props_to_http_response_header_dict(
+    gpu_props,
+) -> Dict[str, str]:
+    gp = gpu_props
+    headers = {}
+    specs = {
+        'X-GPU-Name': lambda: gp.name,
+        'X-GPU-Compute-Capability': lambda: f'{gp.major}.{gp.minor}',
+        'X-GPU-Num-Multi-Processors': lambda: str(gp.multi_processor_count),
+        'X-GPU-PCI': lambda: (
+            f'{gp.pci_bus_id}.{gp.pci_device_id}.{gp.pci_domain_id}'
+        ),
+        'X-GPU-Memory-Total': lambda: str(gp.total_memory),
+        'X-GPU-Memory-Bus-Width': lambda: str(gp.memory_bus_width),
+        'X-GPU-Memory-Clock-Rate': lambda: (
+            f'{gp.memory_clock_rate / 1e3:.0f} MHz'
+        ),
+        'X-GPU-L2-Cache-Size': lambda: str(gp.l2_cache_size),
+        'X-GPU-Clock-Rate': lambda: f'{gp.clock_rate / 1e3:.0f} MHz',
+        'X-GPU-Max-Threads-Per-Multi-Processor': lambda: str(
+            gp.max_threads_per_multi_processor
+        ),
+        'X-GPU-Registers-Per-Multiprocessor': lambda: str(
+            gp.regs_per_multiprocessor
+        ),
+        'X-GPU-Shared-Memory-Per-Block': lambda: (
+            f'{gp.shared_memory_per_block / 1e3:.0f} KB'
+        ),
+        'X-GPU-Shared-Memory-Per-Multiprocessor': lambda: (
+            f'{gp.shared_memory_per_multiprocessor / 1e3:.0f} KB'
+        ),
+        'X-GPU-Warp-Size': lambda: f'{gp.warp_size} bytes',
+    }
+
+    for key, fn in specs.items():
+        try:
+            headers[key] = fn()
+        except AttributeError:
+            continue
+
+    return headers
+
 
 # vim:set ts=8 sw=4 sts=4 tw=78 et:                                           #

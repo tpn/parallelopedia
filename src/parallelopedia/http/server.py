@@ -10,6 +10,7 @@ import mimetypes
 import mmap
 import os
 import posixpath
+import re
 import socket
 import string
 import sys
@@ -44,6 +45,10 @@ normpath = posixpath.normpath
 # ===============================================================================
 IS_WINDOWS = sys.platform == 'win32'
 IS_LINUX = sys.platform.startswith('linux')
+
+# Split CamelCase into ['Camel', 'Case'].  Used to derive route prefixes from
+# class names if no prefix is explicitly provided.
+APP_CLASS_REGEX = re.compile('[A-Z][^A-Z]*')
 
 # ===============================================================================
 # Glue
@@ -656,6 +661,40 @@ class HttpServer(asyncio.Protocol):
             app = app_class(server=self)
             self.apps.append(app)
 
+            # Determine class-level prefix. If the app defines a class-level
+            # 'prefix' attribute, use it. Otherwise, derive one from the class
+            # name by splitting CamelCase and removing trailing 'App' or
+            # 'Command', then kebab-casing the remainder.
+            app_prefix = getattr(app.__class__, 'prefix', None)
+            if not app_prefix:
+                tokens = [
+                    t for t in APP_CLASS_REGEX.findall(
+                        app.__class__.__name__
+                    )
+                ]
+                if tokens:
+                    if tokens[-1] in ('App', 'Command'):
+                        tokens = tokens[:-1]
+                app_prefix = '-'.join(t.lower() for t in tokens)
+
+            # Normalize to a leading slash and no trailing slash, unless empty.
+            def _normalize_segment(s):
+                return s.strip('/') if s else ''
+
+            def _normalize_prefix(p):
+                p = _normalize_segment(p)
+                return ('/' + p) if p else ''
+
+            class_prefix = _normalize_prefix(app_prefix)
+
+            app_name = app.__class__.__name__
+            log_prefix = class_prefix if class_prefix else '(none)'
+            logging.debug(
+                "Registering app %s with prefix '%s'",
+                app_name,
+                log_prefix,
+            )
+
             for name in dir(app):
                 func = getattr(app, name)
                 if not callable(func):
@@ -664,12 +703,24 @@ class HttpServer(asyncio.Protocol):
                     continue
 
                 route_prefix = getattr(func, '__route_prefix__', '')
-                route_path = route_prefix + name
-                if not route_path.startswith('/'):
-                    route_path = '/' + route_path
+
+                # Build the final route path: /<class-prefix>/<func-prefix>/<name>
+                parts = [
+                    _normalize_segment(class_prefix),
+                    _normalize_segment(route_prefix),
+                    _normalize_segment(name),
+                ]
+                parts = [p for p in parts if p]
+                route_path = '/' + '/'.join(parts)
                 if route_path in self.routes:
                     raise ValueError(f'Duplicate route: {route_path}')
                 self.routes[route_path] = (name, func)
+                logging.debug(
+                    "Mapped route %s -> %s.%s",
+                    route_path,
+                    app_name,
+                    name,
+                )
 
     def connection_made(self, transport):
         self.transport = transport
@@ -1385,4 +1436,4 @@ def main(args: Optional[argparse.Namespace] = None):
 if __name__ == '__main__':
     main()
 
-# vim:set ts=8 sw=4 sts=4 tw=78 et:
+# vim:set ts=8 sw=4 sts=4 tw=78 et                                             :
