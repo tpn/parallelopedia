@@ -14,11 +14,15 @@ import json
 import logging
 import mmap
 import os
+import sys
+import tempfile
 import threading
 import time
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from os.path import dirname
 from typing import List, Tuple
+import xml.etree.ElementTree as ET
 
 import datrie
 import mwcomposerfromhell as mwc
@@ -26,7 +30,7 @@ import mwparserfromhell as mwp
 import numpy as np
 from numpy import uint64
 
-from parallelopedia.http.server import (
+from .http.server import (
     HttpApp,
     RangedRequest,
     Request,
@@ -250,6 +254,26 @@ def get_page_offsets_for_key(search_string: str) -> List[Tuple[str, int, int]]:
 
 
 # =============================================================================
+# MediaWiki Helpers
+# =============================================================================
+def wikitext_from_mediawiki_xml(xml_str: str) -> str:
+    root = ET.fromstring(xml_str)
+    # try namespaced <text> first, then non-namespaced
+    text_el = root.find(".//{*}text")
+    if text_el is None:
+        text_el = root.find(".//text")
+    return (text_el.text or "") if text_el is not None else ""
+
+def mediawiki_to_html(wikitext: str) -> str:
+    # call the pandoc binary (fast & deterministic)
+    p = subprocess.run(
+        ["pandoc", "-f", "mediawiki", "-t", "html5"],
+        input=wikitext.encode("utf-8"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
+    )
+    return p.stdout.decode("utf-8")
+
+# =============================================================================
 # Classes
 # =============================================================================
 
@@ -269,7 +293,7 @@ class WikiApp(HttpApp):
         logging.info(f'Loaded title tries in {timer.elapsed:.4f} seconds.')
 
     @route
-    def wiki(self, request, name, **kwds):
+    def wiki_raw(self, request, name, **kwds):
         server = self.server
         # Do an exact lookup if we find a match.
         if len(name) < 1:
@@ -294,6 +318,40 @@ class WikiApp(HttpApp):
             WIKI_XML_SIZE,
             WIKI_XML_LAST_MODIFIED,
         )
+
+    @route
+    def wiki(self, request, name, **kwds):
+        server = self.server
+        # Do an exact lookup if we find a match.
+        if len(name) < 1:
+            return server.error(request, 400, "Name too short (< 1 char)")
+
+        titles = TITLE_TRIES[ord(name[0])]
+        if not titles or name not in titles:
+            return server.error(request, 404)
+
+        o = titles[name][0]
+        o = uint64(o if o > 0 else o * -1)
+        offsets = TITLE_OFFSETS
+        ix = offsets.searchsorted(o, side='right')
+        start = int(o - uint64_7)
+        end = int(offsets[ix] - uint64_11) + 1
+
+        return self._send_xml_chunk_to_html(request, start, end)
+
+    def _send_xml_chunk_to_html(self, request: Request, start: int, end: int):
+        xml_chunk = WIKI_XML_MMAP[start:end]
+        wikitext = wikitext_from_mediawiki_xml(xml_chunk.decode('utf-8'))
+        html = mediawiki_to_html(wikitext)
+
+        response = request.response
+        response.code = 200
+        response.message = 'OK'
+        response.content_type = 'text/html; charset=UTF-8'
+        response.content_length = len(html)
+        response.body = html
+
+        return self.server.send_response(request)
 
     @route
     def offsets(self, request, name, limit=None):
@@ -324,6 +382,20 @@ class WikiApp(HttpApp):
 
     @route
     def html(self, request, *args, **kwds):
+        server = self.server
+        rr = request.range
+        if not rr:
+            return server.error(request, 400, "Ranged-request required.")
+
+        if not rr.set_file_size_safe(WIKI_XML_SIZE, self.server):
+            return
+
+        start = rr.first_byte
+        end = rr.last_byte + 1
+        return self._send_xml_chunk_to_html(request, start, end)
+
+    @route
+    def html_mwp(self, request, *args, **kwds):
         server = self.server
         rr = request.range
         if not rr:

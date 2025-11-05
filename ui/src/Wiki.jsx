@@ -14,10 +14,11 @@ const Wiki = () => {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [selectedXml, setSelectedXml] = useState(null);
-  const [format] = useState("XML");
+  const [format, setFormat] = useState("Raw");
   const [shouldSearch, setShouldSearch] = useState(true);
   const [selectedHtml, setSelectedHtml] = useState(null);
   const [searchStatus, setSearchStatus] = useState("");
+  const [selectedRange, setSelectedRange] = useState(null); // { name, startByte, endByte }
 
   // Build backend base URL from the current hostname, with fixed port 4444
   const backendBaseUrl = `http://${
@@ -31,7 +32,9 @@ const Wiki = () => {
   const handleSearch = (e) => {
     setQuery(e.target.value);
     setShouldSearch(true);
-    setSelectedXml(null); // Clear selected XML when the search box is cleared
+    setSelectedXml(null); // Clear selected content when the search box is cleared
+    setSelectedHtml(null);
+    setSelectedRange(null);
   };
 
   useEffect(() => {
@@ -80,12 +83,12 @@ const Wiki = () => {
     return () => clearTimeout(timeoutId);
   }, [query, shouldSearch, backendBaseUrl]);
 
-  // Handle item click and fetch data based on selected format
-  const handleResultClick = async (name, startByte, endByte) => {
+  // Fetch content for a given byte range using current format
+  const fetchContent = async (name, startByte, endByte) => {
     const startTime = performance.now();
     try {
       const url =
-        format === "XML"
+        format === "Raw"
           ? `${backendBaseUrl}${wikiPrefix}/xml`
           : `${backendBaseUrl}${wikiPrefix}/html`;
       const response = await fetch(url, {
@@ -97,30 +100,42 @@ const Wiki = () => {
       const contentLength = response.headers.get("Content-Length");
       const endTime = performance.now();
       const duration = ((endTime - startTime) / 1000).toFixed(2);
+      const msg = `Received ${bytesToHuman(contentLength)} in ${duration} seconds.`;
+      console.log(msg);
       setShouldSearch(false);
       setQuery(name); // Place the result's name into the search bar
-      if (format === "XML") {
+      if (format === "Raw") {
         setSelectedXml(data);
         setSelectedHtml(null);
-        var msg = `Received ${bytesToHuman(
-          contentLength
-        )} in ${duration} seconds.`;
-        console.log(msg);
-        setSearchStatus(msg);
       } else {
         setSelectedHtml(data);
         setSelectedXml(null);
       }
+      setSearchStatus(msg);
       setResults([]); // Clear results when an item is clicked
     } catch (error) {
-      console.error("Error fetching XML data:", error);
-      if (format === "XML") {
+      console.error("Error fetching content:", error);
+      if (format === "Raw") {
         setSelectedXml(null);
       } else {
         setSelectedHtml(null);
       }
     }
   };
+
+  // Handle item click and fetch data based on selected format
+  const handleResultClick = async (name, startByte, endByte) => {
+    setSelectedRange({ name, startByte, endByte });
+    fetchContent(name, startByte, endByte);
+  };
+
+  // When format changes and a selection exists, re-fetch same range with new format
+  useEffect(() => {
+    if (!selectedRange) return;
+    const { name, startByte, endByte } = selectedRange;
+    fetchContent(name, startByte, endByte);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [format]);
 
   return (
     <Container className="wiki-search-container">
@@ -133,6 +148,26 @@ const Wiki = () => {
           value={query}
           onChange={handleSearch}
         />
+        <div className="mt-2">
+          <Form.Check
+            inline
+            label="Raw"
+            name="render-mode"
+            type="radio"
+            id="render-mode-raw"
+            checked={format === "Raw"}
+            onChange={() => setFormat("Raw")}
+          />
+          <Form.Check
+            inline
+            label="Pandoc"
+            name="render-mode"
+            type="radio"
+            id="render-mode-pandoc"
+            checked={format === "Pandoc"}
+            onChange={() => setFormat("Pandoc")}
+          />
+        </div>
       </Form>
 
       {query && searchStatus && (

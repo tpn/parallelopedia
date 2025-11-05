@@ -81,8 +81,7 @@ body {
 }
 
 .wiki-search-container .card-body {
-  //white-space: pre-wrap; // Preserve whitespace and wrap lines
-  white-space: pre-line; // Preserve whitespace and wrap lines
+  white-space: normal; // Collapse whitespace/newlines for HTML fragments
   word-wrap: break-word; // Break long words
   overflow-wrap: break-word; // Ensure long words break
   line-height: 1.5; // Improve readability with line height
