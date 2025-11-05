@@ -1,0 +1,137 @@
+/*-- scss:defaults --*/
+
+$navbar-bg: transparent;
+$navbar-fg: white;
+$navbar-image: url('~bluebg.jpg');
+
+@font-face {
+  font-family: 'Comic Mono NF';
+  font-weight: normal;
+  font-style: normal;
+  src: url('assets/fonts/Comic.Mono.Nerd.Font.Complete.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Comic Mono NF';
+  font-weight: bold;
+  font-style: normal;
+  src: url('assets/fonts/Comic.Mono.Bold.Nerd.Font.Complete.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'EB Garamond';
+  font-weight: 100 700;
+  font-style: normal;
+  src: url('assets/fonts/EBGaramond-VariableFont_wght.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'EB Garamond';
+  font-weight: 100 700;
+  font-style: italic;
+  src: url('assets/fonts/EBGaramond-Italic-VariableFont_wght.ttf') format('truetype');
+}
+
+// Webfonts for hero title families used in App.css
+@import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:wght@400;700&family=Spectral:wght@700&family=Cormorant+Garamond:wght@600;700&family=Inter:wght@700&family=Playfair+Display:wght@700&family=Cinzel:wght@700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap');
+
+$font-family-sans-serif: 'EB Garamond', 'Palatino', sans-serif;
+$font-family-monospace: 'Comic Mono NF', 'Monaco', monospace;
+
+// Set the monospace font size to be smaller than the default font size.
+$font-size-monospace: 0.70rem;
+// Smaller sizes for smaller screens.
+$font-size-monospace-ipad-mini: 0.5rem;
+$font-size-monospace-mobile: 0.42rem;
+
+//$font-size: 0.875rem;
+
+//$text-align: justify;
+
+/*-- scss:rules --*/
+
+// Import Bootstrap's main SCSS file
+@import "bootstrap";
+
+/*
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+*/
+
+.wiki-search-container {
+  margin-top: 20px; // Add vertical space between the tab and the search box
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.wiki-search-container .list-group {
+  flex-grow: 1;
+  overflow-y: auto;
+}
+
+.wiki-search-container .list-group-item {
+  white-space: normal; // Allow text to wrap
+}
+
+.wiki-search-container .card-body {
+  //white-space: pre-wrap; // Preserve whitespace and wrap lines
+  white-space: pre-line; // Preserve whitespace and wrap lines
+  word-wrap: break-word; // Break long words
+  overflow-wrap: break-word; // Ensure long words break
+  line-height: 1.5; // Improve readability with line height
+}
+
+// Override specific elements with monospace font sizes
+code,
+kbd,
+samp {
+  //white-space: nowrap; // Prevents text wrapping
+  font-size: $font-size-monospace; // Apply custom font size to monospace elements
+}
+
+pre {
+  //white-space: nowrap; // Prevents text wrapping
+  font-size: $font-size-monospace; // Apply custom font size to pre elements
+}
+
+pre code {
+  //white-space: nowrap; // Prevents text wrapping
+  font-size: $font-size-monospace; // Apply custom font size to code inside pre
+}
+
+.command-box,
+.mono {
+  font-family: $font-family-monospace;
+  font-size: $font-size-monospace;
+}
+
+:root {
+  --bs-body-font-size: 0.925rem;
+}
+
+.border-bottom-thin {
+  border-bottom: 1px solid #dee2e6;
+}
+
+// Global background image for the entire app
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  //background-image: url('assets/images/parallelopedia-ui-bg-dark.png');
+  background-image: url('assets/images/parallelopedia-ui-bg-light1.png');
+  background-size: cover; // Stretch/shrink to fill viewport while preserving aspect ratio
+  background-position: center; // Center the image
+  background-repeat: no-repeat; // No tiling
+  background-attachment: fixed; // Keep image fixed during scroll
+}
