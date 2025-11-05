@@ -51,6 +51,8 @@ MODEL_VARIANTS = {
     'gpt-oss-20b': 'openai/gpt-oss-20b',
     'gpt-oss-120b': 'openai/gpt-oss-120b',
     'qwen3-4b': 'Qwen/Qwen3-4B',
+    'lfm2-8b-a1b': 'LiquidAI/LFM2-8B-A1B',
+    'llama2-7b': 'meta-llama/Llama-2-7b-hf',
 }
 
 LLM_DEFAULT_MODEL = 'qwen3-4b'

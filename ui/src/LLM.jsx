@@ -263,6 +263,8 @@ const LLM = () => {
                   <option value="qwen3-4b">qwen3-4b</option>
                   <option value="gpt-oss-20b">gpt-oss-20b</option>
                   <option value="gpt-oss-120b">gpt-oss-120b</option>
+                  <option value="lfm2-8b-a1b">lfm2-8b-a1b</option>
+                  <option value="llama2-7b">llama2-7b</option>
                 </Form.Select>
               </Form.Group>
 
