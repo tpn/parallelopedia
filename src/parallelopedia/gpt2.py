@@ -1353,14 +1353,18 @@ class Gpt2App(HttpApp):
         if gpu_index is not None:
             gpu_http_headers = CUDA_GPU_PROPS_HTTP_HEADERS[f'cuda:{gpu_index}']
 
+        has_model_device = hasattr(model, 'device')
+
         expose_headers = (
             'Access-Control-Expose-Headers: '
             'X-Max-Length, '
             'X-Top-K, '
             'X-Seed, '
             'X-Model-Name, '
-            'X-Model-Device'
         )
+
+        if has_model_device:
+            expose_headers += 'X-Model-Device, '
 
         if gpu_http_headers is not None:
             expose_headers += f', {", ".join(gpu_http_headers.keys())}'
@@ -1370,8 +1374,13 @@ class Gpt2App(HttpApp):
             f'X-Top-K: {top_k}',
             f'X-Seed: {seed}',
             f'X-Model-Name: {model_name}',
-            f'X-Model-Device: {model.device}',
         ]
+
+        if has_model_device:
+            other_headers.append(
+                f'X-Model-Device: {model.device}',
+            )
+
         if gpu_http_headers is not None:
             other_headers.extend([
                 f'{k}: {v}' for k, v in gpu_http_headers.items()
