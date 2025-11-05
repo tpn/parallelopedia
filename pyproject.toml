@@ -37,6 +37,22 @@ dependencies = [
     "numpy",
     "mwcomposerfromhell",
     "mwparserfromhell",
+    # Runtime deps for GPT-OSS/GPT-2. Torch is intentionally NOT listed here
+    # to avoid pip pulling non-CUDA13 (cu12) wheels during editable installs.
+    "transformers",
+    "accelerate",
+    "safetensors",
+    "huggingface_hub",
+    "sentencepiece",
+    "tiktoken",
+]
+
+[project.optional-dependencies]
+# Optional CUDA 13.0 extras. Use with the CUDA 13.0 wheel index, e.g.:
+#   pip install -e .[cuda130] --index-url https://download.pytorch.org/whl/cu130
+cuda130 = [
+    "torch==2.9.*",
+    "torchvision==0.24.*",
 ]
 
 [tool.setuptools]
