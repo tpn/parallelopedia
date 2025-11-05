@@ -45,6 +45,8 @@ dependencies = [
     "huggingface_hub",
     "sentencepiece",
     "tiktoken",
+    "torch",
+    "torchvision",
 ]
 
 [project.optional-dependencies]
