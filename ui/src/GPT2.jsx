@@ -28,6 +28,7 @@ const GPT2 = () => {
   const [headers, setHeaders] = useState("");
 
   const inputRef = useRef(null);
+  const footerRef = useRef(null);
 
   const DEFAULT_PHRASE = "Albert Einstein's Theory of Relativity stated that";
 
@@ -76,6 +77,13 @@ const GPT2 = () => {
   }:4444`;
 
   const gpt2Prefix = "/gpt2";
+
+  // Auto-scroll to keep the footer (rate) visible while streaming
+  useEffect(() => {
+    if (footerRef.current) {
+      footerRef.current.scrollIntoView({ behavior: "auto", block: "end" });
+    }
+  }, [results, charsPerSecond]);
 
   const handleSubmit = async () => {
     setState((prevState) => ({
@@ -260,7 +268,7 @@ const GPT2 = () => {
           <Card.Body className="results-area">
             {results || "Results will be displayed here."}
           </Card.Body>
-          <Card.Footer className="text-muted">
+          <Card.Footer className="text-muted" ref={footerRef}>
             {charsPerSecond.toFixed(2)} chars/s{" "}
             {charsPerSecond < 3
               ? "(< 1 tok/s)"
