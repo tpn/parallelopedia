@@ -27,6 +27,22 @@ const Wiki = () => {
 
   const wikiPrefix = "/wiki";
 
+  // Decode HTML entities (including common ones missing the semicolon like &amp or &quot)
+  const normalizeHtmlEntities = (str) =>
+    typeof str === "string"
+      ? str.replace(/&(amp|quot|apos|lt|gt)(?!;)/g, "&$1;")
+      : str;
+
+  const decodeHtmlEntities = (str) => {
+    if (typeof window === "undefined" || typeof document === "undefined") {
+      return str;
+    }
+    const normalized = normalizeHtmlEntities(str);
+    const textarea = document.createElement("textarea");
+    textarea.innerHTML = normalized;
+    return textarea.value;
+  };
+
   // Debounce search function and abort controller for cancelling requests
   const abortControllerRef = useRef(null);
   const handleSearch = (e) => {
@@ -103,7 +119,7 @@ const Wiki = () => {
       const msg = `Received ${bytesToHuman(contentLength)} in ${duration} seconds.`;
       console.log(msg);
       setShouldSearch(false);
-      setQuery(name); // Place the result's name into the search bar
+      setQuery(decodeHtmlEntities(name)); // Place the decoded result name into the search bar
       if (format === "Raw") {
         setSelectedXml(data);
         setSelectedHtml(null);
@@ -178,13 +194,14 @@ const Wiki = () => {
         <ListGroup className="mt-3">
           {results.map(([name, startByte, endByte]) => {
             const size = endByte - startByte;
+            const displayName = decodeHtmlEntities(name);
             return (
               <ListGroup.Item
                 key={`${name}-${startByte}`}
                 action
                 onClick={() => handleResultClick(name, startByte, endByte)}
               >
-                {name} [{bytesToHuman(size)}]
+                {displayName} [{bytesToHuman(size)}]
               </ListGroup.Item>
             );
           })}
