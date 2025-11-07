@@ -200,6 +200,16 @@ else:
 # Helpers
 # #############################################################################
 
+def _is_control_char(ch: str) -> bool:
+    code = ord(ch)
+    return (0 <= code < 32 and ch not in '\t\n\r') or (127 <= code <= 159)
+
+
+def _is_stream_printable(s: str) -> bool:
+    if '\ufffd' in s:
+        return False
+    return not any(_is_control_char(c) for c in s)
+
 @functools.cache
 def get_gpt2_tokenizer_and_stop() -> Tuple[object, int, str]:
     """
@@ -993,7 +1003,7 @@ class GPT(nn.Module):
 
             # If the next token isn't printable, terminate generation.  (With
             # our locally-trained GPT2 124M model, this happens quite often.)
-            if not all(c in self.printable for c in new_text_fragment):
+            if not _is_stream_printable(new_text_fragment):
                 break
 
             output.append(new_text_fragment)
@@ -1175,7 +1185,7 @@ class GPT(nn.Module):
 
             # If any of the next characters in the decoded text representation
             # aren't printable, terminate generation.
-            if not all(c in self.printable for c in new_text_fragment):
+            if not _is_stream_printable(new_text_fragment):
                 yield -1
                 break
 
@@ -1307,37 +1317,94 @@ class Gpt2App(HttpApp):
 
         model_name = kwds.get('model', None)
         if model_name == 'gpt2-xl':
-            models = PRETRAINED_MODELS
-            get_next = get_next_pretrained_model
+            # Prefer pretrained XL if available; fall back safely if not.
+            try:
+                models = PRETRAINED_MODELS
+            except NameError:
+                models = []
+            try:
+                get_next = get_next_pretrained_model
+            except NameError:
+                def get_next():
+                    return None
         else:
             model_name = 'gpt2'
             models = MODELS
-            get_next = get_next_model
+            try:
+                get_next = get_next_model
+            except NameError:
+                def get_next():
+                    # Fallback: best effort single-model selection
+                    return models[-1] if models else None
 
         model = None
         gpu_index = None
         if device is not None:
             if device == 'cpu':
-                model = models[-1]
+                try:
+                    model = models[-1]
+                except Exception:
+                    model = None
             elif device.startswith('cuda:'):
                 try:
                     index = int(device[5:])
                 except ValueError:
                     index = -1
-                if index < 0 or index >= NUM_GPUS:
-                    index = -1
-                if index != -1:
-                    model = models[index]
-                    gpu_index = index
+                if index >= 0 and index < NUM_GPUS:
+                    try:
+                        model = models[index]
+                        gpu_index = index
+                    except Exception:
+                        model = None
+                else:
+                    # Invalid GPU index; leave model as None to fall back later
+                    model = None
             elif device == 'cuda':
-                index = random.randint(0, NUM_GPUS - 1)
-                model = models[index]
-                gpu_index = index
+                if NUM_GPUS > 0:
+                    index = random.randint(0, NUM_GPUS - 1)
+                    try:
+                        model = models[index]
+                        gpu_index = index
+                    except Exception:
+                        model = None
+                else:
+                    # No GPUs available; fall back to CPU model if present
+                    try:
+                        model = models[-1]
+                    except Exception:
+                        model = None
 
         if not model:
             # Get a model.  If there are multiple models available, e.g. if we
             # have multiple GPUs, this will balance the load a bit.
             model = get_next()
+
+        # If still no model, attempt a generic selection.
+        if not model:
+            try:
+                model = get_next()
+            except Exception:
+                model = None
+
+        # If we still couldn't acquire a model, return an error response early.
+        if model is None:
+            logging.error('No model available to serve request; returning 503')
+            # Ensure custom error headers are visible to browsers.
+            response.other_headers.append(
+                'Access-Control-Expose-Headers: X-Error, X-Model-Name'
+            )
+            response.other_headers.extend([
+                f'X-Model-Name: {model_name}',
+                'X-Error: model-not-loaded',
+            ])
+            try:
+                response_bytes = bytes(response)
+                if self.write(response_bytes):
+                    response.send_chunk('[error] model not loaded; try again later')
+                    response.end_chunks()
+            except Exception:
+                pass
+            return
 
         # If a specific GPU wasn't explicitly chosen above, infer it from the
         # selected model's device so we can attach GPU headers.
