@@ -25,8 +25,6 @@ from typing import List, Tuple
 import xml.etree.ElementTree as ET
 
 import datrie
-import mwcomposerfromhell as mwc
-import mwparserfromhell as mwp
 import numpy as np
 from numpy import uint64
 
@@ -393,30 +391,6 @@ class WikiApp(HttpApp):
         start = rr.first_byte
         end = rr.last_byte + 1
         return self._send_xml_chunk_to_html(request, start, end)
-
-    @route
-    def html_mwp(self, request, *args, **kwds):
-        server = self.server
-        rr = request.range
-        if not rr:
-            return server.error(request, 400, "Ranged-request required.")
-
-        if not rr.set_file_size_safe(WIKI_XML_SIZE, self.server):
-            return
-
-        response = request.response
-        response.code = 200
-        response.message = 'OK'
-        response.content_type = 'text/html; charset=UTF-8'
-
-        file_content = WIKI_XML_MMAP[rr.first_byte:rr.last_byte + 1]
-
-        code = mwp.parse(file_content)
-        html = mwc.compose(code)
-        response.content_length = len(html)
-        response.body = html
-
-        return server.send_response(request)
 
     @route
     def hello(self, request, *args, **kwds):
