@@ -43,6 +43,7 @@ dependencies = [
     "tiktoken",
     "torch",
     "torchvision",
+    "psutil",
 ]
 
 [tool.setuptools]

@@ -14,18 +14,17 @@ import json
 import logging
 import mmap
 import os
-import sys
-import tempfile
+import subprocess
 import threading
 import time
-import subprocess
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from os.path import dirname
 from typing import List, Tuple
-import xml.etree.ElementTree as ET
 
 import datrie
 import numpy as np
+import psutil
 from numpy import uint64
 
 from .http.server import (
@@ -35,35 +34,32 @@ from .http.server import (
     date_time_string,
     route,
 )
-
-from .util import join_path, ElapsedTimer
+from .util import ElapsedTimer, join_path
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-if 'PARALLELOPEDIA_DATA_DIR' in os.environ:
-    DATA_DIR = os.environ['PARALLELOPEDIA_DATA_DIR']
+if "PARALLELOPEDIA_DATA_DIR" in os.environ:
+    DATA_DIR = os.environ["PARALLELOPEDIA_DATA_DIR"]
 else:
-    DATA_DIR = join_path(dirname(__file__), '../../data')
+    DATA_DIR = join_path(dirname(__file__), "../../data")
 
-if 'PARALLELOPEDIA_WIKI_XML_NAME' in os.environ:
-    WIKI_XML_NAME = os.environ['PARALLELOPEDIA_WIKI_XML_NAME']
+if "PARALLELOPEDIA_WIKI_XML_NAME" in os.environ:
+    WIKI_XML_NAME = os.environ["PARALLELOPEDIA_WIKI_XML_NAME"]
 else:
-    WIKI_XML_NAME = 'enwiki-20150205-pages-articles.xml'
+    WIKI_XML_NAME = "enwiki-20150205-pages-articles.xml"
 
-if 'PARALLELOPEDIA_WIKI_XML_DIR' in os.environ:
-    WIKI_XML_DIR = os.environ['PARALLELOPEDIA_WIKI_XML_DIR']
-    WIKI_XML_PATH = join_path(
-        os.environ['PARALLELOPEDIA_WIKI_XML_DIR'], WIKI_XML_NAME
-    )
+if "PARALLELOPEDIA_WIKI_XML_DIR" in os.environ:
+    WIKI_XML_DIR = os.environ["PARALLELOPEDIA_WIKI_XML_DIR"]
+    WIKI_XML_PATH = join_path(os.environ["PARALLELOPEDIA_WIKI_XML_DIR"], WIKI_XML_NAME)
 else:
     WIKI_XML_DIR = DATA_DIR
     WIKI_XML_PATH = join_path(DATA_DIR, WIKI_XML_NAME)
 
 # The directory where the title tries are stored.
-if 'PARALLELOPEDIA_WIKI_TITLE_TRIES_DIR' in os.environ:
-    TRIES_DIR = os.environ['PARALLELOPEDIA_WIKI_TITLE_TRIES_DIR']
+if "PARALLELOPEDIA_WIKI_TITLE_TRIES_DIR" in os.environ:
+    TRIES_DIR = os.environ["PARALLELOPEDIA_WIKI_TITLE_TRIES_DIR"]
 else:
     TRIES_DIR = WIKI_XML_DIR
 
@@ -73,16 +69,14 @@ else:
 # the xml file.  That allows us to isolate the required byte range from the
 # xml file where the particular title is defined.  Such a byte range can be
 # satisfied with a ranged HTTP request.
-if 'PARALLELOPEDIA_WIKI_TITLES_OFFSETS_NPY_DIR' in os.environ:
-    TITLES_OFFSETS_NPY_DIR = (
-        os.environ['PARALLELOPEDIA_WIKI_TITLES_OFFSETS_NPY_DIR']
-    )
+if "PARALLELOPEDIA_WIKI_TITLES_OFFSETS_NPY_DIR" in os.environ:
+    TITLES_OFFSETS_NPY_DIR = os.environ["PARALLELOPEDIA_WIKI_TITLES_OFFSETS_NPY_DIR"]
 else:
     TITLES_OFFSETS_NPY_DIR = WIKI_XML_DIR
 
 TITLES_OFFSETS_NPY_PATH = join_path(
     TITLES_OFFSETS_NPY_DIR,
-    'titles_offsets.npy',
+    "titles_offsets.npy",
 )
 
 # Number of partitions for the title tries.
@@ -99,7 +93,7 @@ uint64_11 = uint64(11)
 # Trie Helpers
 # =============================================================================
 def get_wiki_tries_in_dir(directory: str) -> List[str]:
-    return sorted(glob.glob(f'{directory}/wiki-*.trie'))
+    return sorted(glob.glob(f"{directory}/wiki-*.trie"))
 
 
 def get_wiki_tries(directory: str) -> dict:
@@ -107,9 +101,9 @@ def get_wiki_tries(directory: str) -> dict:
     basename = os.path.basename
     result = {}
     for path in paths:
-        base = basename(path).replace('wiki-', '').replace('.trie', '')
-        parts = base.split('_')
-        assert len(parts) == 2, f'Invalid filename: {base}'
+        base = basename(path).replace("wiki-", "").replace(".trie", "")
+        parts = base.split("_")
+        assert len(parts) == 2, f"Invalid filename: {base}"
         (ordinal, length) = parts
         char = chr(int(ordinal))
         result[char] = path
@@ -117,30 +111,36 @@ def get_wiki_tries(directory: str) -> dict:
 
 
 def load_trie(path: str) -> datrie.Trie:
-    msg_prefix = f'[{threading.get_native_id()}]'
+    msg_prefix = f"[{threading.get_native_id()}]"
     start = time.perf_counter()
-    logging.debug(f'{msg_prefix} Loading {path}...')
+    logging.debug(f"{msg_prefix} Loading {path}...")
     trie = datrie.Trie.load(path)
     end = time.perf_counter()
     elapsed = end - start
-    logging.debug(f'{msg_prefix} Loaded {path} in {elapsed:.4f} seconds.')
+    logging.debug(f"{msg_prefix} Loaded {path} in {elapsed:.4f} seconds.")
     return trie
 
 
-def load_wiki_tries_parallel(
-    directory: str, max_threads: int = 0
-) -> List[datrie.Trie]:
-
+def load_wiki_tries_parallel(directory: str, max_threads: int = 0) -> List[datrie.Trie]:
     if max_threads < 1:
         max_threads = os.cpu_count()
 
     paths_by_first_char = get_wiki_tries(directory)
     tries = [None] * PARTITIONS
     num_tries = len(paths_by_first_char)
-    print(
-        f'Loading {num_tries} tries in parallel with '
-        f'{max_threads} threads...'
-    )
+    print(f"Loading {num_tries} tries in parallel with {max_threads} threads...")
+    proc = psutil.Process(os.getpid())
+    rss_before = proc.memory_info().rss
+
+    def _fmt_bytes(n):
+        units = ["B", "KB", "MB", "GB", "TB"]
+        size = float(n)
+        i = 0
+        while size >= 1024.0 and i < len(units) - 1:
+            size /= 1024.0
+            i += 1
+        return f"{size:.2f} {units[i]}"
+
     start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
         futures = {
@@ -151,21 +151,29 @@ def load_wiki_tries_parallel(
             (char, path) = futures[future]
             try:
                 trie = future.result()
-                assert trie is not None, f'Failed to load {path}'
-                assert ord(char) not in tries, f'Duplicate trie for {char}'
+                assert trie is not None, f"Failed to load {path}"
+                assert ord(char) not in tries, f"Duplicate trie for {char}"
                 tries[ord(char)] = trie
             except Exception as e:
-                print(f'Error loading {path}: {e}')
+                print(f"Error loading {path}: {e}")
     end = time.perf_counter()
     elapsed = end - start
-    print(f'Loaded {num_tries} tries in {elapsed:.4f} seconds.')
+    print(f"Loaded {num_tries} tries in {elapsed:.4f} seconds.")
+    rss_after = proc.memory_info().rss
+    rss_delta = rss_after - rss_before
+    print(
+        "Process memory (RSS): "
+        f"before={_fmt_bytes(rss_before)}, "
+        f"after={_fmt_bytes(rss_after)}, "
+        f"delta={_fmt_bytes(rss_delta)}"
+    )
     return tries
 
 
 # =============================================================================
 # Globals
 # =============================================================================
-WIKI_XML_FILE = open(WIKI_XML_PATH, 'rb')
+WIKI_XML_FILE = open(WIKI_XML_PATH, "rb")
 WIKI_XML_STAT = os.fstat(WIKI_XML_FILE.fileno())
 WIKI_XML_SIZE = WIKI_XML_STAT.st_size
 WIKI_XML_LAST_MODIFIED = date_time_string(WIKI_XML_STAT.st_mtime)
@@ -191,6 +199,7 @@ TITLE_TRIES = None
 # Misc Helpers
 # =============================================================================
 
+
 def json_serialization(request: Request = None, obj: dict = None) -> Request:
     """
     Helper method for converting a dict `obj` into a JSON response for the
@@ -202,8 +211,8 @@ def json_serialization(request: Request = None, obj: dict = None) -> Request:
         obj = {}
     response = request.response
     response.code = 200
-    response.message = 'OK'
-    response.content_type = 'application/json; charset=UTF-8'
+    response.message = "OK"
+    response.content_type = "application/json; charset=UTF-8"
     response.body = json.dumps(obj)
 
     return request
@@ -213,11 +222,11 @@ def text_serialization(request=None, text=None):
     if not request:
         request = Request(transport=None, data=None)
     if not text:
-        text = 'Hello, World!'
+        text = "Hello, World!"
     response = request.response
     response.code = 200
-    response.message = 'OK'
-    response.content_type = 'text/plain; charset=UTF-8'
+    response.message = "OK"
+    response.content_type = "text/plain; charset=UTF-8"
     response.body = text
 
     return request
@@ -246,7 +255,7 @@ def get_page_offsets_for_key(search_string: str) -> List[Tuple[str, int, int]]:
     for key, value in items:
         v = value[0]
         o = uint64(v if v > 0 else v * -1)
-        ix = offsets.searchsorted(o, side='right')
+        ix = offsets.searchsorted(o, side="right")
         results.append((key, int(o - uint64_7), int(offsets[ix] - uint64_11)))
     return results
 
@@ -262,21 +271,25 @@ def wikitext_from_mediawiki_xml(xml_str: str) -> str:
         text_el = root.find(".//text")
     return (text_el.text or "") if text_el is not None else ""
 
+
 def mediawiki_to_html(wikitext: str) -> str:
     # call the pandoc binary (fast & deterministic)
     p = subprocess.run(
         ["pandoc", "-f", "mediawiki", "-t", "html5"],
         input=wikitext.encode("utf-8"),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
     )
     return p.stdout.decode("utf-8")
+
 
 # =============================================================================
 # Classes
 # =============================================================================
 
-class WikiApp(HttpApp):
 
+class WikiApp(HttpApp):
     @classmethod
     def init_once(cls):
         global TITLE_OFFSETS, TITLE_TRIES
@@ -284,11 +297,11 @@ class WikiApp(HttpApp):
         timer = ElapsedTimer()
         with timer:
             TITLE_OFFSETS = np.load(TITLES_OFFSETS_NPY_PATH)
-        logging.info(f'Loaded title offsets in {timer.elapsed:.4f} seconds.')
+        logging.info(f"Loaded title offsets in {timer.elapsed:.4f} seconds.")
 
         with timer:
             TITLE_TRIES = load_wiki_tries_parallel(TRIES_DIR)
-        logging.info(f'Loaded title tries in {timer.elapsed:.4f} seconds.')
+        logging.info(f"Loaded title tries in {timer.elapsed:.4f} seconds.")
 
     @route
     def wiki_raw(self, request, name, **kwds):
@@ -304,12 +317,12 @@ class WikiApp(HttpApp):
         o = titles[name][0]
         o = uint64(o if o > 0 else o * -1)
         offsets = TITLE_OFFSETS
-        ix = offsets.searchsorted(o, side='right')
+        ix = offsets.searchsorted(o, side="right")
         start = int(o - uint64_7)
         end = int(offsets[ix] - uint64_11)
-        range_request = '%d-%d' % (start, end)
+        range_request = "%d-%d" % (start, end)
         request.range = RangedRequest(range_request)
-        request.response.content_type = 'text/xml; charset=utf-8'
+        request.response.content_type = "text/xml; charset=utf-8"
         return server.ranged_sendfile_mmap(
             request,
             WIKI_XML_MMAP,
@@ -331,7 +344,7 @@ class WikiApp(HttpApp):
         o = titles[name][0]
         o = uint64(o if o > 0 else o * -1)
         offsets = TITLE_OFFSETS
-        ix = offsets.searchsorted(o, side='right')
+        ix = offsets.searchsorted(o, side="right")
         start = int(o - uint64_7)
         end = int(offsets[ix] - uint64_11) + 1
 
@@ -339,13 +352,13 @@ class WikiApp(HttpApp):
 
     def _send_xml_chunk_to_html(self, request: Request, start: int, end: int):
         xml_chunk = WIKI_XML_MMAP[start:end]
-        wikitext = wikitext_from_mediawiki_xml(xml_chunk.decode('utf-8'))
+        wikitext = wikitext_from_mediawiki_xml(xml_chunk.decode("utf-8"))
         html = mediawiki_to_html(wikitext)
 
         response = request.response
         response.code = 200
-        response.message = 'OK'
-        response.content_type = 'text/html; charset=UTF-8'
+        response.message = "OK"
+        response.content_type = "text/html; charset=UTF-8"
         response.content_length = len(html)
         response.body = html
 
@@ -370,7 +383,7 @@ class WikiApp(HttpApp):
         if not request.range:
             return server.error(request, 400, "Ranged-request required.")
         else:
-            request.response.content_type = 'text/xml; charset=utf-8'
+            request.response.content_type = "text/xml; charset=utf-8"
             return server.ranged_sendfile_mmap(
                 request,
                 WIKI_XML_MMAP,
@@ -394,7 +407,7 @@ class WikiApp(HttpApp):
 
     @route
     def hello(self, request, *args, **kwds):
-        j = {'args': args, 'kwds': kwds}
+        j = {"args": args, "kwds": kwds}
         return json_serialization(request, j)
 
     @route
@@ -413,13 +426,13 @@ class WikiApp(HttpApp):
     @route
     def json(self, request, *args, **kwds):
         return self.server.send_response(
-            json_serialization(request, {'message': 'Hello, World!'})
+            json_serialization(request, {"message": "Hello, World!"})
         )
 
     @route
     def plaintext(self, request, *args, **kwds):
         return self.server.send_response(
-            text_serialization(request, text='Hello, World!')
+            text_serialization(request, text="Hello, World!")
         )
 
 
