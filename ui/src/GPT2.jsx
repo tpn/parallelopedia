@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Container,
   Form,
@@ -27,6 +27,42 @@ const GPT2 = () => {
   const [results, setResults] = useState("");
   const [headers, setHeaders] = useState("");
 
+  const inputRef = useRef(null);
+
+  const DEFAULT_PHRASE = "Albert Einstein's Theory of Relativity stated that";
+
+  // Global keybinding: press 'd' (when not typing in an input) to prefill the input
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.defaultPrevented) return;
+      const target = e.target;
+      const tag = target && target.tagName ? target.tagName.toUpperCase() : "";
+      const isEditable =
+        (target && target.isContentEditable) ||
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT";
+      if (isEditable) return;
+
+      if (
+        e.key === "d" &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.shiftKey
+      ) {
+        e.preventDefault();
+        setInputText(DEFAULT_PHRASE);
+        if (inputRef.current) {
+          inputRef.current.focus();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   // Combine all related state into a single object
   const [{ charsPerSecond }, setState] = useState({
     totalChars: 0,
@@ -50,7 +86,12 @@ const GPT2 = () => {
     }));
     setResults(""); // Clear previous results
 
-    const encodedText = encodeURIComponent(inputText);
+    const textToUse = inputText.trim().length === 0 ? DEFAULT_PHRASE : inputText;
+    if (textToUse !== inputText) {
+      setInputText(textToUse);
+    }
+
+    const encodedText = encodeURIComponent(textToUse);
     const response = await fetch(
       `${backendBaseUrl}${gpt2Prefix}/generate/${encodedText}?max_length=${maxLength}&seed=${seed}&device=${device}&model=${modelName}`,
       {
@@ -121,13 +162,13 @@ const GPT2 = () => {
               placeholder="Enter text, e.g. &#34;Albert Einstein&#39;s Theory of Relativity stated that&#34;"
               value={inputText}
               onChange={handleInputChange}
+            ref={inputRef}
             />
           </Col>
           <Col xs="auto">
             <Button
               variant="primary"
-              onClick={handleSubmit}
-              disabled={!inputText.trim()}
+            onClick={handleSubmit}
             >
               Submit
             </Button>
