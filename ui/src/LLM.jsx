@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Container,
   Form,
@@ -17,12 +17,12 @@ const LLM = () => {
   const [maxLength, setMaxLength] = useState("");
   const [topK, setTopK] = useState("");
   const [seed, setSeed] = useState("");
-  const [device, setDevice] = useState("");
-  const [modelName, setModelName] = useState("qwen3-4b");
+  const [device, setDevice] = useState("cuda");
+  const [modelName, setModelName] = useState("llama2-7b");
   const [chatMode, setChatMode] = useState(false);
   const [showThinking, setShowThinking] = useState(true);
 
-  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(true);
   const [showHeaders, setShowHeaders] = useState(false);
 
   const handleInputChange = (e) => {
@@ -39,12 +39,51 @@ const LLM = () => {
     startCharsTime: null,
   });
 
+  const inputRef = useRef(null);
+  const footerRef = useRef(null);
+
+  const DEFAULT_PHRASE = "Albert Einstein's Theory of Relativity stated that";
+
   // Build backend base URL from the current hostname, with fixed port 4444
   const backendBaseUrl = `http://${
     typeof window !== "undefined" ? window.location.hostname : "localhost"
   }:4444`;
 
   const llmPrefix = "/llm";
+
+  // Global keybinding: press 'd' (when not typing in an input) to prefill the input
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.defaultPrevented) return;
+      const target = e.target;
+      const tag = target && target.tagName ? target.tagName.toUpperCase() : "";
+      const isEditable =
+        (target && target.isContentEditable) ||
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT";
+      if (isEditable) return;
+
+      const key = (e.key || "").toLowerCase();
+      if (key === "d" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setInputText(DEFAULT_PHRASE);
+        if (inputRef.current) {
+          inputRef.current.focus();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // Auto-scroll to keep the footer (rate) visible while streaming
+  useEffect(() => {
+    if (footerRef.current) {
+      footerRef.current.scrollIntoView({ behavior: "auto", block: "end" });
+    }
+  }, [results, charsPerSecond]);
 
   const handleSubmit = async () => {
     setState((prevState) => ({
@@ -56,7 +95,12 @@ const LLM = () => {
     setResults("");
     let collected = "";
 
-    const encodedText = encodeURIComponent(inputText);
+    const textToUse = inputText.trim().length === 0 ? DEFAULT_PHRASE : inputText;
+    if (textToUse !== inputText) {
+      setInputText(textToUse);
+    }
+
+    const encodedText = encodeURIComponent(textToUse);
 
     const params = new URLSearchParams();
     if (maxLength !== "") params.set("max_length", maxLength);
@@ -123,16 +167,16 @@ const LLM = () => {
             <Col>
               <FormControl
                 type="text"
-                placeholder='Enter text, e.g. "The quick brown fox jumps over"'
+                placeholder="Enter text, e.g. &#34;Albert Einstein&#39;s Theory of Relativity stated that&#34;"
                 value={inputText}
                 onChange={handleInputChange}
+                ref={inputRef}
               />
             </Col>
             <Col xs="auto">
               <Button
                 variant="primary"
                 onClick={handleSubmit}
-                disabled={!inputText.trim()}
               >
                 Submit
               </Button>
@@ -163,6 +207,7 @@ const LLM = () => {
                   placeholder="Enter user prompt/content"
                   value={inputText}
                   onChange={handleInputChange}
+                  ref={inputRef}
                 />
               </Col>
             </Row>
@@ -171,7 +216,6 @@ const LLM = () => {
                 <Button
                   variant="primary"
                   onClick={handleSubmit}
-                  disabled={!inputText.trim()}
                 >
                   Submit
                 </Button>
@@ -314,7 +358,7 @@ const LLM = () => {
           <Card.Body className="results-area">
             {results || "Results will be displayed here."}
           </Card.Body>
-          <Card.Footer className="text-muted">
+          <Card.Footer className="text-muted" ref={footerRef}>
             {charsPerSecond.toFixed(2)} chars/s {" "}
             {charsPerSecond < 3
               ? "(< 1 tok/s)"
